@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-electron/
+release/
+out/
+build/
+
+# Local app data and databases
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+storage-config.json
+local-ai-chat-export.json
+exports/
+attachments/
+pasted-images/
+
+# Logs and raw AI responses
+*.log
+logs/
+ai_raw_response_*.txt
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Electron/Vite cache
+.cache/
+.vite/
