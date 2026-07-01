@@ -203,11 +203,14 @@ export interface ChatErrorEvent {
 }
 
 export type ImageGenerationSize = "256x256" | "512x512" | "768x768" | "1024x1024" | "1024x1792" | "1792x1024";
+export type ImageGenerationMode = "openai_images" | "chat_completions_image" | "gemini_generate_content";
 
 export interface ImageGenerationInput {
   prompt: string;
   providerId?: string;
   model?: string;
+  mode?: ImageGenerationMode;
+  endpointOverride?: string;
   size: ImageGenerationSize;
   count: number;
 }
