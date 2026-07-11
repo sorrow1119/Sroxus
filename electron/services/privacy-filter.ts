@@ -1,4 +1,4 @@
-import { getSetting } from "../database/settings";
+﻿import { getSetting } from "../database/settings";
 import type { ChatMessage } from "./ai-client";
 
 export type PrivacyFilterMode = "balanced" | "strict";
@@ -90,8 +90,8 @@ export function sanitizeMessagesForAI(messages: ChatMessage[]): { messages: Chat
 
   const counters = new Map<string, number>();
   const sanitized = messages.map((message) => {
-    const result = redactSensitiveText(message.content, settings.mode, counters);
-    return result.changed ? { ...message, content: result.text } : message;
+    const result = redactChatContent(message.content, settings.mode, counters);
+    return result.changed ? { ...message, content: result.content } : message;
   });
 
   const hitsByType = Object.fromEntries(counters.entries());
@@ -122,6 +122,22 @@ export function sanitizeMessagesForAI(messages: ChatMessage[]): { messages: Chat
   };
 }
 
+function redactChatContent(content: ChatMessage["content"], mode: PrivacyFilterMode, counters: Map<string, number>) {
+  if (typeof content === "string") {
+    const result = redactSensitiveText(content, mode, counters);
+    return { content: result.text, changed: result.changed };
+  }
+  let changed = false;
+  const next = content.map((part) => {
+    if (part.type !== "text") {
+      return part;
+    }
+    const result = redactSensitiveText(part.text, mode, counters);
+    changed = changed || result.changed;
+    return result.changed ? { ...part, text: result.text } : part;
+  });
+  return { content: next, changed };
+}
 export function redactSensitiveText(text: string, mode: PrivacyFilterMode = "balanced", counters = new Map<string, number>()) {
   let output = text;
   let changed = false;
@@ -196,3 +212,4 @@ function luhnCheck(digits: string) {
   }
   return sum % 10 === 0;
 }
+

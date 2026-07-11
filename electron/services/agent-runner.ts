@@ -1,4 +1,4 @@
-import { DEFAULT_RECENT_MESSAGES } from "../../shared/constants";
+﻿import { DEFAULT_RECENT_MESSAGES } from "../../shared/constants";
 import type { AIAgent, AgentResult, Message } from "../../shared/types";
 import { getConversation } from "../database/conversations";
 import { listMessages } from "../database/messages";
@@ -32,7 +32,7 @@ export async function runAgent(
   const client = new OpenAICompatibleClient(agent.model ? { ...provider, model: agent.model } : provider);
   const conversation = getConversation(conversationId);
   const keepRecent = Number.parseInt(getSetting("recentMessages") ?? "", 10) || DEFAULT_RECENT_MESSAGES;
-  const contextMessages = buildAgentContext(
+  const contextMessages = await buildAgentContext(
     agent,
     buildMessagesForAgent(listMessages(conversationId), options.parentMessageId),
     conversation,
@@ -81,18 +81,18 @@ export async function runMultipleAgents(tasks: ManualAgentTask[], options: RunMu
   return results;
 }
 
-function buildAgentContext(
+async function buildAgentContext(
   agent: AIAgent,
   messages: Message[],
   conversation: ReturnType<typeof getConversation>,
   keepRecent: number,
   userMessage: string,
-): ChatMessage[] {
+): Promise<ChatMessage[]> {
   const context: ChatMessage[] = [];
   if (agent.systemPrompt) {
     context.push({ role: "system", content: agent.systemPrompt });
   }
-  context.push(...buildRequestMessages(conversation, messages, keepRecent));
+  context.push(...(await buildRequestMessages(conversation, messages, keepRecent)));
   context.push({ role: "user", content: userMessage });
   return dedupeAdjacentSystemMessages(context);
 }
@@ -118,3 +118,5 @@ function dedupeAdjacentSystemMessages(messages: ChatMessage[]): ChatMessage[] {
     return !previous || previous.role !== "system" || previous.content !== message.content;
   });
 }
+
+

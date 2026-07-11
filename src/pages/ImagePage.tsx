@@ -1,6 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import type { GeneratedImage, ImageGenerationMode, ImageGenerationResult, ImageGenerationSize, Provider } from "../../shared/types";
 
+const LAST_IMAGE_SETTINGS_KEY = "imageGeneration.lastSettings";
+
+interface LastImageSettings {
+  providerId?: string;
+  model?: string;
+  mode?: ImageGenerationMode;
+  endpointOverride?: string;
+  size?: ImageGenerationSize;
+  count?: number;
+}
+
 interface ImagePageProps {
   onBack: () => void;
 }
@@ -33,6 +44,7 @@ const T = {
   noImageData: "\u65e0\u56fe\u7247\u6570\u636e",
   open: "\u6253\u5f00",
   download: "\u4e0b\u8f7d",
+  autoSaved: "\u5df2\u81ea\u52a8\u4fdd\u5b58",
   addProviderFirst: "\u8bf7\u5148\u5728\u8bbe\u7f6e\u91cc\u6dfb\u52a0\u4e00\u4e2a Provider\u3002",
   chooseModel: "\u8bf7\u586b\u5199\u6216\u9009\u62e9\u751f\u56fe\u6a21\u578b\u540d\u3002",
   enterPrompt: "\u8bf7\u8f93\u5165\u751f\u56fe\u63d0\u793a\u8bcd\u3002",
@@ -78,6 +90,7 @@ export default function ImagePage({ onBack }: ImagePageProps) {
   const [loadingProviders, setLoadingProviders] = useState(false);
   const [message, setMessage] = useState<{ type: "info" | "error" | "success"; text: string } | null>(null);
   const [result, setResult] = useState<ImageGenerationResult | null>(null);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
 
   const selectedProvider = useMemo(
     () => providers.find((provider) => provider.id === providerId) ?? providers.find((provider) => provider.isDefault) ?? providers[0] ?? null,
@@ -105,7 +118,7 @@ export default function ImagePage({ onBack }: ImagePageProps) {
       if (nextProvider) {
         setProviderId(nextProvider.id);
         const options = Array.from(new Set([...(nextProvider.enabledModels ?? []), nextProvider.model].map((item) => item.trim()).filter(Boolean)));
-        const keepModel = preferredModel && options.includes(preferredModel) ? preferredModel : "";
+        const keepModel = preferredModel?.trim() || "";
         setModel(keepModel || options[0] || nextProvider.model || "");
       } else {
         setProviderId("");
@@ -119,8 +132,35 @@ export default function ImagePage({ onBack }: ImagePageProps) {
   }
 
   useEffect(() => {
-    void loadProviders();
+    async function init() {
+      let saved: LastImageSettings = {};
+      try {
+        const raw = await window.electronAPI.settings.get(LAST_IMAGE_SETTINGS_KEY);
+        saved = raw ? (JSON.parse(raw) as LastImageSettings) : {};
+        if (saved.mode && MODES.some((item) => item.value === saved.mode)) setMode(saved.mode);
+        if (saved.endpointOverride !== undefined) setEndpointOverride(saved.endpointOverride);
+        if (saved.size && SIZES.includes(saved.size)) setSize(saved.size);
+        if (typeof saved.count === "number") setCount(Math.min(4, Math.max(1, Math.trunc(saved.count))));
+      } catch {
+        saved = {};
+      }
+      await loadProviders(saved.providerId, saved.model);
+      setSettingsLoaded(true);
+    }
+
+    void init();
   }, []);
+
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    const timer = window.setTimeout(() => {
+      void window.electronAPI.settings.set(
+        LAST_IMAGE_SETTINGS_KEY,
+        JSON.stringify({ providerId, model, mode, endpointOverride, size, count }),
+      );
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [providerId, model, mode, endpointOverride, size, count, settingsLoaded]);
 
   useEffect(() => {
     if (!selectedProvider) return;
@@ -158,6 +198,10 @@ export default function ImagePage({ onBack }: ImagePageProps) {
         count,
       });
       setResult(next);
+      void window.electronAPI.settings.set(
+        LAST_IMAGE_SETTINGS_KEY,
+        JSON.stringify({ providerId: selectedProvider.id, model: model.trim(), mode, endpointOverride, size, count }),
+      );
       setMessage({ type: "success", text: T.generatedPrefix + next.images.length + T.generatedSuffix });
     } catch (error) {
       setMessage({ type: "error", text: error instanceof Error ? error.message : String(error) });
@@ -170,7 +214,7 @@ export default function ImagePage({ onBack }: ImagePageProps) {
     const next = providers.find((provider) => provider.id === id);
     setProviderId(id);
     const options = next ? Array.from(new Set([...(next.enabledModels ?? []), next.model].map((item) => item.trim()).filter(Boolean))) : [];
-    setModel(options[0] ?? "");
+    setModel(options.includes(model) ? model : (options[0] ?? ""));
     setModelFilter("");
   }
 
@@ -384,6 +428,7 @@ function GeneratedImageCard({ image, index }: { image: GeneratedImage; index: nu
       </div>
       <figcaption className="space-y-2 p-3">
         {image.revisedPrompt && <p className="text-xs leading-5 text-slate-500">{image.revisedPrompt}</p>}
+        {image.savedPath && <p className="break-all text-xs text-emerald-300">{T.autoSaved}: {image.savedPath}</p>}
         <div className="flex flex-wrap gap-2">
           {image.url && (
             <button onClick={() => window.open(image.url, "_blank", "noopener,noreferrer")} className="rounded-md border border-[#343b49] px-2 py-1 text-xs text-slate-300 hover:bg-[#242936]">

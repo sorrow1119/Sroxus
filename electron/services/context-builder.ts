@@ -1,12 +1,12 @@
-import type { Conversation, Message } from "../../shared/types";
-import { formatAttachmentsForPrompt } from "./attachments";
+﻿import type { Conversation, Message } from "../../shared/types";
+import { formatAttachmentsForPrompt, imageAttachmentToDataUrl } from "./attachments";
 
 type ContextMessage = {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
 };
 
-export function buildRequestMessages(conversation: Conversation, messages: Message[], keepRecent: number): ContextMessage[] {
+export async function buildRequestMessages(conversation: Conversation, messages: Message[], keepRecent: number): Promise<ContextMessage[]> {
   const systemMessages = messages.filter((message) => !message.compressed && message.role === "system");
   const recent = messages.filter((message) => !message.compressed && message.role !== "system").slice(-keepRecent);
   const context: ContextMessage[] = [];
@@ -17,14 +17,30 @@ export function buildRequestMessages(conversation: Conversation, messages: Messa
     context.push({ role: "system", content: `以下是之前对话的摘要：\n${conversation.summary}` });
   }
   context.push(...systemMessages.map((message) => ({ role: "system" as const, content: message.content })));
-  context.push(...recent.map((message) => ({ role: message.role, content: enrichMessageContent(message) })));
+  context.push(...(await Promise.all(recent.map(async (message) => ({ role: message.role, content: await enrichMessageContent(message) })))));
   return context;
 }
 
-function enrichMessageContent(message: Message) {
-  const attachmentText = formatAttachmentsForPrompt(message.attachments ?? []);
-  if (!attachmentText) {
-    return message.content;
+async function enrichMessageContent(message: Message): Promise<ContextMessage["content"]> {
+  const attachments = message.attachments ?? [];
+  const imageAttachments = attachments.filter((attachment) => attachment.kind === "image");
+  const documentAttachments = attachments.filter((attachment) => attachment.kind !== "image");
+  const attachmentText = formatAttachmentsForPrompt(documentAttachments);
+  const text = `${message.content}${attachmentText ? `${message.content ? "\n\n" : ""}[附件信息]\n${attachmentText}` : ""}`;
+  if (!imageAttachments.length) {
+    return text;
   }
-  return `${message.content}${message.content ? "\n\n" : ""}[附件信息]\n${attachmentText}`;
+  const parts: ContextMessage["content"] = [];
+  if (text.trim()) {
+    parts.push({ type: "text", text });
+  }
+  for (const attachment of imageAttachments) {
+    const dataUrl = await imageAttachmentToDataUrl(attachment);
+    if (dataUrl) {
+      parts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+  }
+  return parts.length ? parts : text;
 }
+
+

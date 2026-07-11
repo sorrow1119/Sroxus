@@ -1,4 +1,4 @@
-import { ipcMain, type WebContents } from "electron";
+﻿import { ipcMain, type WebContents } from "electron";
 import { DEFAULT_RECENT_MESSAGES } from "../../shared/constants";
 import type { AIAgent, Message, RegenerateMode } from "../../shared/types";
 import { listEnabledAgents } from "../database/agents";
@@ -170,7 +170,7 @@ async function runGeneration(
   try {
     const conversation = getConversation(conversationId);
     const keepRecent = Number.parseInt(getSetting("recentMessages") ?? "", 10) || DEFAULT_RECENT_MESSAGES;
-    const contextMessages = buildRequestMessages(
+    const contextMessages = await buildRequestMessages(
       conversation,
       buildMessagesForGeneration(listMessages(conversationId), assistantMessageId, options?.upToMessageId, options?.instruction),
       keepRecent,
@@ -378,3 +378,4 @@ function createTimeoutController() {
   controller.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
   return controller;
 }
+

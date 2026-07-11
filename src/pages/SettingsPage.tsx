@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import { PROVIDER_PRESETS } from "../../shared/constants";
-import type { DataStats, EndpointPathMode, Provider, ProviderInput } from "../../shared/types";
+import type { DataStats, EndpointPathMode, ModelCapability, Provider, ProviderInput } from "../../shared/types";
 import { useI18n, type Language } from "../i18n";
 
 interface SettingsPageProps {
@@ -16,6 +16,7 @@ const EMPTY_FORM: ProviderInput = {
   apiKey: "",
   model: "",
   enabledModels: [],
+  modelCapabilities: {},
   temperature: 0.7,
   maxTokens: 4096,
   stream: true,
@@ -81,6 +82,7 @@ const TEXT = {
     noModelMatch: "没有匹配的模型",
     enabledModels: "已启用模型",
     noEnabledModels: "还没有启用模型。",
+    modelCapabilities: "模型能力",
     makeProviderDefaultModel: "设为该 Provider 的默认模型",
     removeModel: "删除这个模型",
     save: "保存",
@@ -181,6 +183,7 @@ const TEXT = {
     noModelMatch: "No matching models",
     enabledModels: "Enabled models",
     noEnabledModels: "No enabled models yet.",
+    modelCapabilities: "Model capabilities",
     makeProviderDefaultModel: "Set as this Provider's default model",
     removeModel: "Remove this model",
     save: "Save",
@@ -405,23 +408,38 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
       const nextModels = checked
         ? normalizeModels([...(current.enabledModels ?? []), model])
         : normalizeModels(current.enabledModels ?? []).filter((item) => item !== model);
-      return chooseDefaultModel({ ...current, enabledModels: nextModels });
+      return chooseDefaultModel({ ...current, enabledModels: nextModels, modelCapabilities: syncCapabilities(current.modelCapabilities, nextModels) });
     });
   }
 
+  function toggleCapability(model: string, capability: ModelCapability, checked: boolean) {
+    setForm((current) => {
+      const currentCaps = current.modelCapabilities?.[model] ?? inferModelCapabilities(model);
+      const nextCaps = checked
+        ? normalizeCapabilities([...currentCaps, capability])
+        : normalizeCapabilities(currentCaps.filter((item) => item !== capability));
+      return {
+        ...current,
+        modelCapabilities: {
+          ...(current.modelCapabilities ?? {}),
+          [model]: nextCaps,
+        },
+      };
+    });
+  }
   function addManualModel() {
     const model = manualModel.trim() || form.model.trim();
     if (!model) {
       return;
     }
-    setForm((current) => chooseDefaultModel({ ...current, enabledModels: normalizeModels([...(current.enabledModels ?? []), model]) }));
+    setForm((current) => { const nextModels = normalizeModels([...(current.enabledModels ?? []), model]); return chooseDefaultModel({ ...current, enabledModels: nextModels, modelCapabilities: syncCapabilities(current.modelCapabilities, nextModels) }); });
     setManualModel("");
   }
 
   function removeEnabledModel(model: string) {
     setForm((current) => {
       const nextModels = normalizeModels(current.enabledModels ?? []).filter((item) => item !== model);
-      return chooseDefaultModel({ ...current, enabledModels: nextModels });
+      return chooseDefaultModel({ ...current, enabledModels: nextModels, modelCapabilities: syncCapabilities(current.modelCapabilities, nextModels) });
     });
   }
 
@@ -476,6 +494,7 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
               onAddManualModel={addManualModel}
               onRemoveEnabledModel={removeEnabledModel}
               onToggleModel={toggleModel}
+              onToggleCapability={toggleCapability}
               onLoadModels={() => void loadModels()}
               onTestConnection={() => void testConnection()}
               onSave={() => void saveProvider()}
@@ -569,6 +588,7 @@ function ModelConfigTab({
   onAddManualModel,
   onRemoveEnabledModel,
   onToggleModel,
+  onToggleCapability,
   onLoadModels,
   onTestConnection,
   onSave,
@@ -598,6 +618,7 @@ function ModelConfigTab({
   onAddManualModel: () => void;
   onRemoveEnabledModel: (model: string) => void;
   onToggleModel: (model: string, checked: boolean) => void;
+  onToggleCapability: (model: string, capability: ModelCapability, checked: boolean) => void;
   onLoadModels: () => void;
   onTestConnection: () => void;
   onSave: () => void;
@@ -840,7 +861,7 @@ function ModelConfigTab({
                       >
                         {model}
                       </button>
-                      {model === form.model && <span className="text-xs text-emerald-300">{s("default")}</span>}
+                      {model === form.model && <span className="text-xs text-emerald-300">{s("default")}</span>}<CapabilityEditor model={model} capabilities={form.modelCapabilities?.[model] ?? inferModelCapabilities(model)} onToggle={onToggleCapability} />
                       <button onClick={() => onRemoveEnabledModel(model)} className="text-slate-500 hover:text-rose-300" title={s("removeModel")}>
                         x
                       </button>
@@ -1090,6 +1111,7 @@ function toInput(provider: Provider): ProviderInput {
     apiKey: provider.apiKey,
     model: provider.model,
     enabledModels: provider.enabledModels?.length ? provider.enabledModels : [provider.model].filter(Boolean),
+    modelCapabilities: provider.modelCapabilities ?? {},
     temperature: provider.temperature,
     maxTokens: provider.maxTokens,
     stream: provider.stream,
@@ -1169,3 +1191,50 @@ function makeTranslator(language: Language) {
     return template.replace(/\{(\w+)\}/g, (_match, name) => String(params[name] ?? ""));
   };
 }
+
+const CAPABILITY_OPTIONS: Array<{ value: ModelCapability; label: string; title: string }> = [
+  { value: "text", label: "T", title: "文本" },
+  { value: "vision", label: "👁", title: "看图" },
+  { value: "tools", label: "🔧", title: "工具" },
+  { value: "web", label: "🌐", title: "联网" },
+  { value: "reasoning", label: "思", title: "思考" },
+];
+
+function CapabilityEditor({ model, capabilities, onToggle }: { model: string; capabilities: ModelCapability[]; onToggle: (model: string, capability: ModelCapability, checked: boolean) => void }) {
+  return (
+    <span className="inline-flex items-center gap-1 border-l border-[#343b49] pl-2">
+      {CAPABILITY_OPTIONS.map((item) => (
+        <label key={item.value} title={item.title} className="inline-flex cursor-pointer items-center gap-1 rounded border border-[#343b49] px-1 py-0.5 text-[11px] text-slate-400 hover:text-slate-100">
+          <input type="checkbox" checked={capabilities.includes(item.value)} onChange={(event) => onToggle(model, item.value, event.target.checked)} className="h-3 w-3" />
+          <span>{item.label}</span>
+        </label>
+      ))}
+    </span>
+  );
+}
+
+function syncCapabilities(current: ProviderInput["modelCapabilities"] | undefined, models: string[]) {
+  const out: NonNullable<ProviderInput["modelCapabilities"]> = {};
+  for (const model of models) {
+    out[model] = normalizeCapabilities(current?.[model] ?? inferModelCapabilities(model));
+  }
+  return out;
+}
+
+function normalizeCapabilities(values: ModelCapability[]) {
+  return Array.from(new Set<ModelCapability>(["text", ...values]));
+}
+
+function inferModelCapabilities(model: string): ModelCapability[] {
+  const lower = model.toLowerCase();
+  const caps: ModelCapability[] = ["text"];
+  if (/vision|vl|image|visual|gpt-4o|gemini|qwen-vl|qvq|llava|pixtral|claude-3|claude-4|doubao.*vision/.test(lower)) caps.push("vision");
+  if (/tool|function|gpt-4o|gpt-5|claude|gemini|qwen|max|deepseek/.test(lower)) caps.push("tools");
+  if (/web|search|online|sonar|perplexity|联网/.test(lower)) caps.push("web");
+  if (/reason|thinking|r1|o1|o3|o4|qvq|qwq|deepseek-reasoner/.test(lower)) caps.push("reasoning");
+  return Array.from(new Set(caps));
+}
+
+
+
+

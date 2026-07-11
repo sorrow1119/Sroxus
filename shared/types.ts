@@ -1,7 +1,9 @@
-export type Role = "system" | "user" | "assistant";
+﻿export type Role = "system" | "user" | "assistant";
 export type MessageStatus = "sending" | "success" | "error";
 export type EndpointPathMode = "exact" | "append_chat_completions" | "append_v1_chat_completions";
 export type AttachmentKind = "image" | "document";
+export type ModelCapability = "text" | "vision" | "tools" | "web" | "reasoning";
+export type ModelCapabilitiesMap = Record<string, ModelCapability[]>;
 
 export interface MessageAttachment {
   id: string;
@@ -63,6 +65,7 @@ export interface Provider {
   apiKey: string;
   model: string;
   enabledModels: string[];
+  modelCapabilities?: ModelCapabilitiesMap;
   temperature: number;
   maxTokens: number;
   stream: boolean;
@@ -219,6 +222,8 @@ export interface GeneratedImage {
   url?: string;
   dataUrl?: string;
   revisedPrompt?: string;
+  savedPath?: string;
+  savedFileName?: string;
 }
 
 export interface ImageGenerationResult {
@@ -318,3 +323,6 @@ export interface ElectronAPI {
     onError: (handler: (event: ChatErrorEvent) => void) => () => void;
   };
 }
+
+
+

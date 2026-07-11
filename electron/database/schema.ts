@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+﻿import type Database from "better-sqlite3";
 
 export function migrate(db: Database.Database) {
   db.pragma("foreign_keys = ON");
@@ -44,6 +44,7 @@ export function migrate(db: Database.Database) {
       apiKey TEXT NOT NULL,
       model TEXT NOT NULL,
       enabledModels TEXT DEFAULT '[]',
+      modelCapabilities TEXT DEFAULT '{}',
       temperature REAL DEFAULT 0.7,
       maxTokens INTEGER DEFAULT 4096,
       stream INTEGER DEFAULT 1,
@@ -82,6 +83,7 @@ export function migrate(db: Database.Database) {
   ensureColumn(db, "providers", "autoAppendPath", "INTEGER DEFAULT 0");
   ensureColumn(db, "providers", "endpointPathMode", "TEXT DEFAULT 'exact'");
   ensureColumn(db, "providers", "enabledModels", "TEXT DEFAULT '[]'");
+  ensureColumn(db, "providers", "modelCapabilities", "TEXT DEFAULT '{}'");
   ensureColumn(db, "messages", "agentId", "TEXT DEFAULT ''");
   ensureColumn(db, "messages", "agentName", "TEXT DEFAULT ''");
   ensureColumn(db, "messages", "parentMessageId", "TEXT DEFAULT ''");
@@ -103,3 +105,4 @@ function ensureColumn(db: Database.Database, table: string, column: string, defi
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
+

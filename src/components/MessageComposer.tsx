@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useRef, useState } from "react";
 import type { AIAgent } from "../../shared/types";
 import { useI18n } from "../i18n";
 import AgentMentionInput from "./AgentMentionInput";
@@ -115,7 +115,7 @@ export default function MessageComposer({
   }
 
   return (
-    <div className="border-t border-[#2a2f3a] bg-[#11141b] p-4" onMouseDown={() => focusComposer()}>
+    <div className="border-t border-[#2a2f3a] bg-[#11141b] p-4" onClick={(event) => { if (event.target === event.currentTarget) focusComposer(); }}>
       <div className="mx-auto max-w-4xl space-y-3">
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2">
@@ -200,3 +200,4 @@ function readFileAsDataUrl(file: File) {
     reader.readAsDataURL(file);
   });
 }
+

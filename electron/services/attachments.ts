@@ -1,4 +1,4 @@
-import fs from "node:fs";
+﻿import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AttachmentKind, MessageAttachment } from "../../shared/types";
@@ -175,4 +175,19 @@ export function copyAttachmentDirectory(oldPath: string, newPath: string) {
     return;
   }
   fs.cpSync(sourceDir, targetDir, { recursive: true, force: true });
+}
+
+export async function imageAttachmentToDataUrl(attachment: MessageAttachment) {
+  if (attachment.kind !== "image") {
+    return "";
+  }
+  if (attachment.previewDataUrl) {
+    return attachment.previewDataUrl;
+  }
+  const buffer = await fs.promises.readFile(attachment.storedPath).catch(() => null);
+  if (!buffer) {
+    return "";
+  }
+  const mimeType = attachment.mimeType || "image/png";
+  return `data:${mimeType};base64,${buffer.toString("base64")}`;
 }

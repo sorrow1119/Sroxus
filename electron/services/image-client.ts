@@ -63,7 +63,7 @@ export class OpenAICompatibleImageClient {
       };
     }
 
-    const images = parseAnyImageResponse(rawText);
+    const images = await saveGeneratedImages(parseAnyImageResponse(rawText));
     if (images.length) {
       return {
         ok: true,
@@ -236,6 +236,55 @@ function dedupeImages(images: GeneratedImage[]) {
     seen.add(key);
     return true;
   });
+}
+
+async function saveGeneratedImages(images: GeneratedImage[]) {
+  const saved: GeneratedImage[] = [];
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+  const dir = path.join(getStoragePath(), "generated-images", day);
+  fs.mkdirSync(dir, { recursive: true });
+
+  for (const [index, image] of images.entries()) {
+    const file = await imageToFile(image, dir, now, index + 1).catch(() => null);
+    saved.push(file ? { ...image, savedPath: file.path, savedFileName: file.name } : image);
+  }
+
+  return saved;
+}
+
+async function imageToFile(image: GeneratedImage, dir: string, date: Date, index: number) {
+  const data = image.dataUrl ? dataUrlToBuffer(image.dataUrl) : image.url ? await urlToBuffer(image.url) : null;
+  if (!data) return null;
+
+  const stamp = date.toISOString().replace(/[:.]/g, "-");
+  const fileName = `sroxus-image-${stamp}-${String(index).padStart(2, "0")}.${data.ext}`;
+  const filePath = path.join(dir, fileName);
+  fs.writeFileSync(filePath, data.buffer);
+  return { path: filePath, name: fileName };
+}
+
+function dataUrlToBuffer(dataUrl: string) {
+  const match = /^data:(image\/[^;]+);base64,(.+)$/i.exec(dataUrl);
+  if (!match) return null;
+  return { buffer: Buffer.from(match[2], "base64"), ext: mimeToExt(match[1]) };
+}
+
+async function urlToBuffer(url: string) {
+  if (!/^https?:\/\//i.test(url)) return null;
+  const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
+  if (!response.ok) return null;
+  const mime = response.headers.get("content-type")?.split(";")[0] ?? "image/png";
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return { buffer, ext: mimeToExt(mime) };
+}
+
+function mimeToExt(mime: string) {
+  const value = mime.toLowerCase();
+  if (value.includes("jpeg") || value.includes("jpg")) return "jpg";
+  if (value.includes("webp")) return "webp";
+  if (value.includes("gif")) return "gif";
+  return "png";
 }
 
 function pickString(value: unknown) {

@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Conversation, Message, Provider } from "../../shared/types";
+﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import type { Conversation, Message, ModelCapability, Provider } from "../../shared/types";
 
 export interface ModelChoice {
   providerId: string;
   providerName: string;
   model: string;
   label: string;
+  capabilities: ModelCapability[];
 }
 
 export function useChatStore() {
@@ -408,10 +409,10 @@ function flattenModelChoices(providers: Provider[]): ModelChoice[] {
       providerName: provider.name,
       model,
       label: `${provider.name} / ${model}`,
+      capabilities: provider.modelCapabilities?.[model] ?? inferModelCapabilities(model),
     }));
   });
 }
-
 function friendlyError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("SQLITE") || message.toLowerCase().includes("database")) {
@@ -419,3 +420,15 @@ function friendlyError(error: unknown) {
   }
   return message;
 }
+
+function inferModelCapabilities(model: string): ModelCapability[] {
+  const lower = model.toLowerCase();
+  const caps: ModelCapability[] = ["text"];
+  if (/vision|vl|image|visual|gpt-4o|gemini|qwen-vl|qvq|llava|pixtral|claude-3|claude-4|doubao.*vision/.test(lower)) caps.push("vision");
+  if (/tool|function|gpt-4o|gpt-5|claude|gemini|qwen|max|deepseek/.test(lower)) caps.push("tools");
+  if (/web|search|online|sonar|perplexity|联网/.test(lower)) caps.push("web");
+  if (/reason|thinking|r1|o1|o3|o4|qvq|qwq|deepseek-reasoner/.test(lower)) caps.push("reasoning");
+  return Array.from(new Set(caps));
+}
+
+

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import type { ModelChoice } from "../hooks/useChatStore";
 
@@ -9,7 +9,7 @@ interface ModelSelectorProps {
   onSelect: (choice: ModelChoice | null) => void;
 }
 
-type ModelCapability = "vision" | "tools" | "web";
+type ModelCapability = "text" | "vision" | "tools" | "web" | "reasoning";
 
 export default function ModelSelector({ choices, selected, disabled, onSelect }: ModelSelectorProps) {
   const { t } = useI18n();
@@ -92,7 +92,7 @@ export default function ModelSelector({ choices, selected, disabled, onSelect }:
                       <div className="truncate font-medium">{choice.model}</div>
                       <div className="truncate text-xs text-slate-500">{choice.providerName}</div>
                     </div>
-                    <CapabilityBadges capabilities={guessModelCapabilities(choice)} />
+                    <CapabilityBadges capabilities={choice.capabilities} />
                   </button>
                 );
               })
@@ -127,23 +127,6 @@ function CapabilityBadges({ capabilities }: { capabilities: ModelCapability[] })
   );
 }
 
-function guessModelCapabilities(choice: ModelChoice): ModelCapability[] {
-  const name = `${choice.providerName} ${choice.model}`.toLowerCase();
-  const capabilities: ModelCapability[] = [];
-
-  if (matchesAny(name, ["vision", "vl", "4v", "gpt-4o", "gpt-4.1", "gemini", "claude-3", "pixtral", "llava", "minicpm", "internvl", "qvq", "molmo"])) {
-    capabilities.push("vision");
-  }
-  if (matchesAny(name, ["gpt-4o", "gpt-4.1", "o3", "o4", "claude-3.5", "claude-3-5", "claude-3.7", "claude-3-7", "gemini", "qwen", "tool", "function"])) {
-    capabilities.push("tools");
-  }
-  if (matchesAny(name, ["search", "web", "online", "sonar", "perplexity", "联网", "搜索"])) {
-    capabilities.push("web");
-  }
-
-  return capabilities;
-}
-
 function matchesAny(value: string, needles: string[]) {
   return needles.some((needle) => value.includes(needle));
 }
@@ -157,3 +140,4 @@ function capabilityLabel(t: (key: string) => string, capability: ModelCapability
   }
   return t("models.web");
 }
+

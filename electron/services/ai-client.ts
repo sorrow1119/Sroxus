@@ -1,13 +1,17 @@
-import fs from "node:fs";
+﻿import fs from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import type { EndpointPathMode, ProviderInput } from "../../shared/types";
 import { sanitizeForLog, sanitizeMessagesForAI } from "./privacy-filter";
 import { getStoragePath } from "./storage-path";
 
+export type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ChatContentPart[];
 };
 
 type ChatOptions = {
@@ -114,7 +118,7 @@ export class OpenAICompatibleClient {
       provider: this.config.name,
       model: this.config.model,
       messageCount: outboundMessages.length,
-      inputChars: outboundMessages.reduce((sum, message) => sum + message.content.length, 0),
+      inputChars: outboundMessages.reduce((sum, message) => sum + chatContentTextLength(message.content), 0),
       privacyFilterEnabled: privacy.report.enabled,
       privacyFilterChanged: privacy.report.changed,
       privacyFilterHits: privacy.report.totalHits,
@@ -572,4 +576,11 @@ function looksLikeModelsPayload(text: string) {
   } catch {
     return false;
   }
+}
+
+function chatContentTextLength(content: ChatMessage["content"]) {
+  if (typeof content === "string") {
+    return content.length;
+  }
+  return content.reduce((sum, part) => sum + (part.type === "text" ? part.text.length : 0), 0);
 }
