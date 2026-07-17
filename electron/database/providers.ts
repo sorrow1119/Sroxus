@@ -120,7 +120,7 @@ export function listProviders(): Provider[] {
   const rows = getDb()
     .prepare(
       `SELECT id, name, baseUrl, apiKey, model, temperature, maxTokens, stream, endpointType, autoAppendPath, endpointPathMode, isDefault, createdAt
-       , enabledModels
+       , enabledModels, modelCapabilities
        FROM providers
        ORDER BY isDefault DESC, createdAt ASC`,
     )
@@ -141,7 +141,7 @@ export function getProvider(id: string): Provider {
   const row = getDb()
     .prepare(
       `SELECT id, name, baseUrl, apiKey, model, temperature, maxTokens, stream, endpointType, autoAppendPath, endpointPathMode, isDefault, createdAt
-       , enabledModels
+       , enabledModels, modelCapabilities
        FROM providers WHERE id = ?`,
     )
     .get(id) as ProviderRow | undefined;
@@ -170,6 +170,7 @@ export function createProvider(input: ProviderInput): Provider {
       encryptApiKey(input.apiKey),
       input.model.trim(),
       stringifyEnabledModels(input.enabledModels, input.model),
+      stringifyModelCapabilities(input.modelCapabilities, uniqueModels([...(input.enabledModels ?? []), input.model])),
       input.temperature ?? 0.7,
       input.maxTokens ?? 4096,
       input.stream === false ? 0 : 1,
@@ -202,6 +203,7 @@ export function updateProvider(id: string, input: Partial<ProviderInput>): Provi
       input.apiKey === undefined ? encryptApiKey(current.apiKey) : encryptApiKey(input.apiKey),
       next.model.trim(),
       stringifyEnabledModels(next.enabledModels, next.model),
+      stringifyModelCapabilities(next.modelCapabilities, uniqueModels([...(next.enabledModels ?? []), next.model])),
       next.temperature ?? 0.7,
       next.maxTokens ?? 4096,
       next.stream === false ? 0 : 1,
@@ -229,6 +231,4 @@ export function setDefaultProvider(id: string): Provider {
   tx();
   return getProvider(id);
 }
-
-
 
