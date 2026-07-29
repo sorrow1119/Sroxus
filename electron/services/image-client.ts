@@ -6,7 +6,7 @@ import { getStoragePath } from "./storage-path";
 
 type ProbeResult =
   | { ok: true; value: ImageGenerationResult }
-  | { ok: false; retryWithoutBase64?: boolean; message: string };
+  | { ok: false; retryWithoutBase64?: boolean; retryWithoutNegativePrompt?: boolean; message: string };
 
 export class OpenAICompatibleImageClient {
   constructor(private readonly provider: ProviderInput) {}
@@ -26,28 +26,81 @@ export class OpenAICompatibleImageClient {
       throw new Error("请输入生图提示词。");
     }
 
-    let lastError = modeHint(mode);
-    for (const endpoint of endpointCandidates(this.provider.baseUrl, mode, model, input.endpointOverride)) {
-      const first = await this.tryGenerate(endpoint, input, mode, true);
-      if (first.ok) return first.value;
-      lastError = first.message;
+    const requestedCount = Math.max(1, Math.min(4, Math.trunc(input.count || 1)));
+    const images: GeneratedImage[] = [];
+    const errors: string[] = [];
+    let resultMeta: ImageGenerationResult | null = null;
 
-      if (mode === "openai_images" && first.retryWithoutBase64) {
-        const retry = await this.tryGenerate(endpoint, input, mode, false);
-        if (retry.ok) return retry.value;
-        lastError = retry.message;
+    for (let index = 0; index < requestedCount && images.length < requestedCount; index += 1) {
+      try {
+        const single = await this.generateSingle({ ...input, count: 1 }, mode, model);
+        resultMeta ??= single;
+        images.push(...single.images.slice(0, requestedCount - images.length));
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
       }
     }
+
+    if (!resultMeta || !images.length) {
+      throw new Error(errors[0] ?? modeHint(mode));
+    }
+
+    const missingCount = requestedCount - images.length;
+    return {
+      ...resultMeta,
+      prompt: input.prompt,
+      images,
+      ...(missingCount > 0
+        ? { warning: `请求生成 ${requestedCount} 张，成功 ${images.length} 张，失败 ${missingCount} 张。${errors[0] ? `\n${errors[0]}` : ""}` }
+        : {}),
+    };
+  }
+
+  private async generateSingle(input: ImageGenerationInput, mode: ImageGenerationMode, model: string): Promise<ImageGenerationResult> {
+    let lastError = modeHint(mode);
+    const useNativeNegativePrompt = mode === "openai_images" && Boolean(input.negativePrompt?.trim());
+
+    for (const endpoint of endpointCandidates(this.provider.baseUrl, mode, model, input.endpointOverride)) {
+      const queue: Array<{ requestBase64: boolean; nativeNegativePrompt: boolean }> = [
+        { requestBase64: true, nativeNegativePrompt: useNativeNegativePrompt },
+      ];
+      const tried = new Set<string>();
+
+      while (queue.length) {
+        const attempt = queue.shift()!;
+        const key = `${attempt.requestBase64}:${attempt.nativeNegativePrompt}`;
+        if (tried.has(key)) continue;
+        tried.add(key);
+
+        const result = await this.tryGenerate(endpoint, input, mode, attempt.requestBase64, attempt.nativeNegativePrompt);
+        if (result.ok) return result.value;
+        lastError = result.message;
+
+        if (mode === "openai_images" && attempt.requestBase64 && result.retryWithoutBase64) {
+          queue.push({ ...attempt, requestBase64: false });
+        }
+        if (attempt.nativeNegativePrompt && result.retryWithoutNegativePrompt) {
+          queue.push({ ...attempt, nativeNegativePrompt: false });
+        }
+      }
+    }
+
     throw new Error(lastError);
   }
 
-  private async tryGenerate(endpoint: string, input: ImageGenerationInput, mode: ImageGenerationMode, requestBase64: boolean): Promise<ProbeResult> {
+  private async tryGenerate(
+    endpoint: string,
+    input: ImageGenerationInput,
+    mode: ImageGenerationMode,
+    requestBase64: boolean,
+    useNativeNegativePrompt: boolean,
+  ): Promise<ProbeResult> {
     let response: Response;
     try {
       response = await fetch(endpoint, {
         method: "POST",
         headers: this.headers(),
-        body: JSON.stringify(buildPayload(this.provider.model, input, mode, requestBase64)),
+        body: JSON.stringify(buildPayload(this.provider.model, input, mode, requestBase64, useNativeNegativePrompt)),
         signal: AbortSignal.timeout(120000),
       });
     } catch (error) {
@@ -59,11 +112,12 @@ export class OpenAICompatibleImageClient {
       return {
         ok: false,
         retryWithoutBase64: mode === "openai_images" && requestBase64 && shouldRetryWithoutBase64(response.status, rawText),
+        retryWithoutNegativePrompt: useNativeNegativePrompt && (response.status === 400 || response.status === 422),
         message: `${explainImageHttpError(response.status, rawText)}\n日志: ${saveImageRawResponse("http-error", endpoint, rawText)}`,
       };
     }
 
-    const images = await saveGeneratedImages(parseAnyImageResponse(rawText));
+    const images = await saveGeneratedImages(parseAnyImageResponse(rawText).slice(0, 1));
     if (images.length) {
       return {
         ok: true,
@@ -92,11 +146,19 @@ export class OpenAICompatibleImageClient {
   }
 }
 
-function buildPayload(model: string, input: ImageGenerationInput, mode: ImageGenerationMode, requestBase64: boolean) {
+function buildPayload(
+  model: string,
+  input: ImageGenerationInput,
+  mode: ImageGenerationMode,
+  requestBase64: boolean,
+  useNativeNegativePrompt: boolean,
+) {
+  const prompt = useNativeNegativePrompt ? input.prompt.trim() : promptWithNegative(input);
+
   if (mode === "chat_completions_image") {
     return {
       model,
-      messages: [{ role: "user", content: input.prompt }],
+      messages: [{ role: "user", content: prompt }],
       stream: false,
     };
   }
@@ -106,7 +168,7 @@ function buildPayload(model: string, input: ImageGenerationInput, mode: ImageGen
       contents: [
         {
           role: "user",
-          parts: [{ text: input.prompt }],
+          parts: [{ text: prompt }],
         },
       ],
       generationConfig: {
@@ -117,11 +179,18 @@ function buildPayload(model: string, input: ImageGenerationInput, mode: ImageGen
 
   return {
     model,
-    prompt: input.prompt,
+    prompt,
     size: input.size,
-    n: input.count,
+    n: 1,
+    ...(useNativeNegativePrompt && input.negativePrompt?.trim() ? { negative_prompt: input.negativePrompt.trim() } : {}),
     ...(requestBase64 ? { response_format: "b64_json" } : {}),
   };
+}
+
+function promptWithNegative(input: ImageGenerationInput) {
+  const prompt = input.prompt.trim();
+  const negativePrompt = input.negativePrompt?.trim();
+  return negativePrompt ? `${prompt}\n\n请避免图片中出现以下内容：${negativePrompt}` : prompt;
 }
 
 function endpointCandidates(baseUrl: string, mode: ImageGenerationMode, model: string, override?: string) {

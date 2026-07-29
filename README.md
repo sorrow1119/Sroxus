@@ -36,8 +36,9 @@ Vite + TypeScript + Tailwind CSS + SQLite 构建。它重点解决长会话上�
   chat composer.
 
 - **Image generation / AI 生图**  
-  Use providers that support `/v1/images/generations` to generate images from
-  prompts without downloading local models.
+  Generate multiple images, use negative prompts, and enter custom output
+  resolutions through OpenAI-compatible, Chat Completions image, or Gemini-style
+  providers without downloading local models.
 
 - **Plugins foundation / 插件系统雏形**  
   Includes a local plugin manifest and management foundation for future extension

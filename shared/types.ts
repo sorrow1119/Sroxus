@@ -205,11 +205,12 @@ export interface ChatErrorEvent {
   error: string;
 }
 
-export type ImageGenerationSize = "256x256" | "512x512" | "768x768" | "1024x1024" | "1024x1792" | "1792x1024";
+export type ImageGenerationSize = string;
 export type ImageGenerationMode = "openai_images" | "chat_completions_image" | "gemini_generate_content";
 
 export interface ImageGenerationInput {
   prompt: string;
+  negativePrompt?: string;
   providerId?: string;
   model?: string;
   mode?: ImageGenerationMode;
@@ -232,6 +233,7 @@ export interface ImageGenerationResult {
   endpoint: string;
   prompt: string;
   images: GeneratedImage[];
+  warning?: string;
 }
 
 export interface ElectronAPI {

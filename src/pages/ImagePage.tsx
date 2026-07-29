@@ -8,7 +8,11 @@ interface LastImageSettings {
   model?: string;
   mode?: ImageGenerationMode;
   endpointOverride?: string;
+  negativePrompt?: string;
   size?: ImageGenerationSize;
+  customSizeEnabled?: boolean;
+  customWidth?: string;
+  customHeight?: string;
   count?: number;
 }
 
@@ -36,7 +40,15 @@ const T = {
   modelHelp: "\u62c9\u53d6\u6a21\u578b\u548c\u751f\u56fe\u8c03\u7528\u53ef\u4ee5\u4e0d\u662f\u540c\u4e00\u4e2a\u63a5\u53e3\uff1b\u8fd9\u91cc\u663e\u793a\u7684\u662f\u5f53\u524d Provider \u5df2\u6dfb\u52a0/\u542f\u7528\u7684\u6a21\u578b\uff0c\u4e5f\u652f\u6301\u624b\u52a8\u8f93\u5165\u3002",
   promptLabel: "\u63d0\u793a\u8bcd",
   promptPlaceholder: "\u63cf\u8ff0\u4f60\u60f3\u751f\u6210\u7684\u56fe\u7247\uff0c\u4f8b\u5982\uff1a\u4e00\u5f20\u672a\u6765\u611f\u684c\u9762 AI \u5ba2\u6237\u7aef\u5ba3\u4f20\u56fe\uff0c\u6df1\u8272\u754c\u9762\uff0c\u73bb\u7483\u8d28\u611f\uff0c\u9ad8\u6e05",
+  negativePromptLabel: "\u53cd\u5411\u63d0\u793a\u8bcd\uff08\u53ef\u9009\uff09",
+  negativePromptPlaceholder: "\u586b\u5199\u4e0d\u5e0c\u671b\u51fa\u73b0\u7684\u5185\u5bb9\uff0c\u4f8b\u5982\uff1a\u6587\u5b57\u3001\u6c34\u5370\u3001\u6a21\u7cca\u3001\u91cd\u590d\u4e3b\u4f53",
+  negativePromptHelp: "\u539f\u751f\u652f\u6301\u53cd\u5411\u63d0\u793a\u8bcd\u7684\u63a5\u53e3\u4f1a\u76f4\u63a5\u4f20\u9012\uff1b\u4e0d\u652f\u6301\u65f6\u4f1a\u81ea\u52a8\u8f6c\u6362\u4e3a\u201c\u907f\u514d\u51fa\u73b0\u201d\u6307\u4ee4\u3002",
   size: "\u5c3a\u5bf8",
+  customSize: "\u81ea\u5b9a\u4e49",
+  customWidth: "\u5bbd\u5ea6",
+  customHeight: "\u9ad8\u5ea6",
+  customSizeHelp: "\u81ea\u5b9a\u4e49\u5c3a\u5bf8\u4f1a\u6309 \u5bbd\u5ea6 x \u9ad8\u5ea6 \u76f4\u63a5\u53d1\u9001\uff0c\u662f\u5426\u53ef\u7528\u53d6\u51b3\u4e8e\u5f53\u524d\u6a21\u578b\u548c\u670d\u52a1\u5546\u3002",
+  invalidCustomSize: "\u8bf7\u8f93\u5165 1 \u5230 16384 \u4e4b\u95f4\u7684\u6574\u6570\u5bbd\u5ea6\u548c\u9ad8\u5ea6\u3002",
   count: "\u6570\u91cf",
   generating: "\u751f\u6210\u4e2d...",
   generate: "\u751f\u6210\u56fe\u7247",
@@ -54,6 +66,7 @@ const T = {
 };
 
 const SIZES: ImageGenerationSize[] = ["1024x1024", "1024x1792", "1792x1024", "768x768", "512x512", "256x256"];
+const CUSTOM_SIZE_VALUE = "__custom__";
 
 const MODES: Array<{ value: ImageGenerationMode; label: string; hint: string; placeholder: string }> = [
   {
@@ -84,7 +97,11 @@ export default function ImagePage({ onBack }: ImagePageProps) {
   const [mode, setMode] = useState<ImageGenerationMode>("openai_images");
   const [endpointOverride, setEndpointOverride] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [negativePrompt, setNegativePrompt] = useState("");
   const [size, setSize] = useState<ImageGenerationSize>("1024x1024");
+  const [customSizeEnabled, setCustomSizeEnabled] = useState(false);
+  const [customWidth, setCustomWidth] = useState("1024");
+  const [customHeight, setCustomHeight] = useState("1024");
   const [count, setCount] = useState(1);
   const [generating, setGenerating] = useState(false);
   const [loadingProviders, setLoadingProviders] = useState(false);
@@ -139,7 +156,14 @@ export default function ImagePage({ onBack }: ImagePageProps) {
         saved = raw ? (JSON.parse(raw) as LastImageSettings) : {};
         if (saved.mode && MODES.some((item) => item.value === saved.mode)) setMode(saved.mode);
         if (saved.endpointOverride !== undefined) setEndpointOverride(saved.endpointOverride);
+        if (saved.negativePrompt !== undefined) setNegativePrompt(saved.negativePrompt);
         if (saved.size && SIZES.includes(saved.size)) setSize(saved.size);
+        const savedCustomSize = saved.size?.match(/^(\d+)x(\d+)$/);
+        if (saved.customSizeEnabled || (saved.size && !SIZES.includes(saved.size) && savedCustomSize)) {
+          setCustomSizeEnabled(true);
+          setCustomWidth(saved.customWidth ?? savedCustomSize?.[1] ?? "1024");
+          setCustomHeight(saved.customHeight ?? savedCustomSize?.[2] ?? "1024");
+        }
         if (typeof saved.count === "number") setCount(Math.min(4, Math.max(1, Math.trunc(saved.count))));
       } catch {
         saved = {};
@@ -156,11 +180,11 @@ export default function ImagePage({ onBack }: ImagePageProps) {
     const timer = window.setTimeout(() => {
       void window.electronAPI.settings.set(
         LAST_IMAGE_SETTINGS_KEY,
-        JSON.stringify({ providerId, model, mode, endpointOverride, size, count }),
+        JSON.stringify({ providerId, model, mode, endpointOverride, negativePrompt, size, customSizeEnabled, customWidth, customHeight, count }),
       );
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [providerId, model, mode, endpointOverride, size, count, settingsLoaded]);
+  }, [providerId, model, mode, endpointOverride, negativePrompt, size, customSizeEnabled, customWidth, customHeight, count, settingsLoaded]);
 
   useEffect(() => {
     if (!selectedProvider) return;
@@ -184,6 +208,14 @@ export default function ImagePage({ onBack }: ImagePageProps) {
       return;
     }
 
+    const width = parseCustomDimension(customWidth);
+    const height = parseCustomDimension(customHeight);
+    if (customSizeEnabled && (width === null || height === null)) {
+      setMessage({ type: "error", text: T.invalidCustomSize });
+      return;
+    }
+    const resolvedSize = customSizeEnabled ? `${width}x${height}` : size;
+
     setGenerating(true);
     setResult(null);
     setMessage({ type: "info", text: T.generatingInfo });
@@ -192,17 +224,19 @@ export default function ImagePage({ onBack }: ImagePageProps) {
         providerId: selectedProvider.id,
         model: model.trim(),
         prompt: text,
+        negativePrompt: negativePrompt.trim() || undefined,
         mode,
         endpointOverride: endpointOverride.trim() || undefined,
-        size,
+        size: resolvedSize,
         count,
       });
       setResult(next);
       void window.electronAPI.settings.set(
         LAST_IMAGE_SETTINGS_KEY,
-        JSON.stringify({ providerId: selectedProvider.id, model: model.trim(), mode, endpointOverride, size, count }),
+        JSON.stringify({ providerId: selectedProvider.id, model: model.trim(), mode, endpointOverride, negativePrompt, size, customSizeEnabled, customWidth, customHeight, count }),
       );
-      setMessage({ type: "success", text: T.generatedPrefix + next.images.length + T.generatedSuffix });
+      const completionText = T.generatedPrefix + next.images.length + T.generatedSuffix;
+      setMessage({ type: next.warning ? "info" : "success", text: next.warning ? `${completionText}\n${next.warning}` : completionText });
     } catch (error) {
       setMessage({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -341,12 +375,30 @@ export default function ImagePage({ onBack }: ImagePageProps) {
               />
             </label>
 
+            <label className="grid gap-1 text-sm text-slate-300">
+              <span>{T.negativePromptLabel}</span>
+              <textarea
+                value={negativePrompt}
+                onChange={(event) => setNegativePrompt(event.target.value)}
+                placeholder={T.negativePromptPlaceholder}
+                className="min-h-24 resize-y rounded-md border border-[#343b49] bg-[#0f1117] px-3 py-2 text-slate-100 outline-none placeholder:text-slate-600 focus:border-[#3b82f6]"
+              />
+              <span className="text-xs leading-5 text-slate-500">{T.negativePromptHelp}</span>
+            </label>
+
             <div className="grid gap-4 sm:grid-cols-2">
-              <label className="grid gap-1 text-sm text-slate-300">
+              <div className="grid gap-1 text-sm text-slate-300">
                 <span>{T.size}</span>
                 <select
-                  value={size}
-                  onChange={(event) => setSize(event.target.value as ImageGenerationSize)}
+                  value={customSizeEnabled ? CUSTOM_SIZE_VALUE : size}
+                  onChange={(event) => {
+                    if (event.target.value === CUSTOM_SIZE_VALUE) {
+                      setCustomSizeEnabled(true);
+                    } else {
+                      setCustomSizeEnabled(false);
+                      setSize(event.target.value);
+                    }
+                  }}
                   disabled={mode === "gemini_generate_content"}
                   className="rounded-md border border-[#343b49] bg-[#0f1117] px-3 py-2 text-slate-100 outline-none focus:border-[#3b82f6] disabled:opacity-60"
                 >
@@ -355,8 +407,39 @@ export default function ImagePage({ onBack }: ImagePageProps) {
                       {item}
                     </option>
                   ))}
+                  <option value={CUSTOM_SIZE_VALUE}>{T.customSize}</option>
                 </select>
-              </label>
+                {customSizeEnabled && mode !== "gemini_generate_content" && (
+                  <>
+                    <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={16384}
+                        step={1}
+                        value={customWidth}
+                        onChange={(event) => setCustomWidth(event.target.value)}
+                        aria-label={T.customWidth}
+                        placeholder={T.customWidth}
+                        className="min-w-0 rounded-md border border-[#343b49] bg-[#0f1117] px-3 py-2 text-slate-100 outline-none placeholder:text-slate-600 focus:border-[#3b82f6]"
+                      />
+                      <span className="text-slate-500">x</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={16384}
+                        step={1}
+                        value={customHeight}
+                        onChange={(event) => setCustomHeight(event.target.value)}
+                        aria-label={T.customHeight}
+                        placeholder={T.customHeight}
+                        className="min-w-0 rounded-md border border-[#343b49] bg-[#0f1117] px-3 py-2 text-slate-100 outline-none placeholder:text-slate-600 focus:border-[#3b82f6]"
+                      />
+                    </div>
+                    <span className="text-xs leading-5 text-slate-500">{T.customSizeHelp}</span>
+                  </>
+                )}
+              </div>
               <label className="grid gap-1 text-sm text-slate-300">
                 <span>{T.count}</span>
                 <input
@@ -417,6 +500,12 @@ export default function ImagePage({ onBack }: ImagePageProps) {
       </main>
     </div>
   );
+}
+
+function parseCustomDimension(value: string) {
+  if (!/^\d+$/.test(value.trim())) return null;
+  const number = Number.parseInt(value, 10);
+  return number >= 1 && number <= 16384 ? number : null;
 }
 
 function GeneratedImageCard({ image, index }: { image: GeneratedImage; index: number }) {
