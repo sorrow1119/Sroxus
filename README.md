@@ -9,6 +9,18 @@ privacy protection, attachments, and image generation.
 Vite + TypeScript + Tailwind CSS + SQLite 构建。它重点解决长会话上下文
 过长、多 Provider 接入、多 AI 协作、隐私保护、附件对话和生图等个人使用场景。
 
+## What's New in 0.1.5 / 0.1.5 更新
+
+- **Image workspace / AI 生图**: text-to-image, image editing and reference-based creation, a local thumbnail gallery, prompt assistance, task history and recovery, and configurable image size and resolution.
+- **Video workspace / AI 生视频**: text-to-video, first-frame, first-and-last-frame and multi-image reference modes, configurable provider protocols and task management. Available modes and parameters depend on the provider and model.
+- **Chat / 对话**: select and quote part of a message, with scroll protection while reading or selecting. Context compression and recovery have also been improved.
+- **Providers / 供应商**: model capabilities can be identified and adjusted manually. Existing provider recommendations are retained, with HiveGPT, Neco Api, A6api.ai and APInex added as optional recommendations.
+- **Privacy / 隐私**: the app does not provide API keys. Configure your own provider credentials and endpoint locally. Some optional registration links are affiliate links; users choose whether to use them.
+
+此版本新增生图与生视频工作区，支持本地图库、参考素材和任务管理；对话支持选择引用，并改善滚动与上下文压缩。实际可用的模式、尺寸和参数以所选服务商及模型为准。
+
+推荐供应商中的部分注册链接包含推广参数。新增四家的 API Key 和 Base URL 均不预填，用户可自行注册并在本地配置；请自行了解第三方服务的隐私政策和收费规则。
+
 ## Highlights / 主要特点
 
 - **Local-first storage / 本地优先**  
