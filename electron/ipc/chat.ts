@@ -30,6 +30,19 @@ export function registerChatIpc() {
         throw new Error("消息内容和附件不能同时为空。");
       }
 
+      // 看图能力校验：附件含图片但当前模型不支持 vision 时，给出明确提示而非静默失败。
+      const hasImage = attachments.some((attachment) => attachment.kind === "image");
+      if (hasImage) {
+        const targetProvider = providerId ? getProvider(providerId) : getDefaultProvider();
+        const targetModel = model ?? targetProvider.model;
+        const capabilities = targetProvider.modelCapabilities?.[targetModel] ?? [];
+        if (!capabilities.includes("vision")) {
+          throw new Error(
+            `当前模型「${targetProvider.name} / ${targetModel}」不支持看图（vision）。请切换到支持视觉的模型，或移除图片附件后再发送。`,
+          );
+        }
+      }
+
       const userContent = text || "请结合我上传的附件继续处理。";
       const route = detectCollaborationMode(userContent, listEnabledAgents());
       const userMessage = createMessage(conversationId, "user", userContent, "success", { attachments });

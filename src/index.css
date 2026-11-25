@@ -21,6 +21,21 @@ body {
   box-sizing: border-box;
 }
 
+.chat-message-content, .chat-message-content :is(p, span, pre, code, li, blockquote, td, th, strong, em, a) {
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-app-region: no-drag;
+}
+.chat-message-content button, .chat-selection-toolbar { user-select:none; -webkit-user-select:none; }
+.chat-message-content ::selection { background:#3977c999; color:inherit; }
+.chat-selection-toolbar { position:fixed; z-index:100; display:flex; gap:4px; padding:4px; margin:0 !important; border:1px solid #526076; border-radius:7px; background:#151820; box-shadow:0 4px 18px #0007; }
+.chat-selection-toolbar button { padding:5px 9px; border-radius:4px; color:#e2e8f0; font-size:12px; }
+.chat-selection-toolbar button:hover, .chat-selection-toolbar button:focus-visible { background:#334155; }
+.chat-copy-notice { position:fixed; z-index:110; top:70px; right:24px; border:1px solid #526076; border-radius:6px; padding:8px 12px; background:#151820; color:#e2e8f0; font-size:12px; }
+:root[data-effective-theme="light"] :is(.chat-selection-toolbar,.chat-copy-notice) { background:#fff; border-color:#cbd5e1; color:#1e293b; }
+:root[data-effective-theme="light"] .chat-selection-toolbar button { color:#1e293b; }
+:root[data-effective-theme="light"] .chat-selection-toolbar button:hover { background:#e2e8f0; }
+
 :root[data-effective-theme="light"] {
   color-scheme: light;
 }

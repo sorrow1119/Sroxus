@@ -77,6 +77,20 @@ export function migrate(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_ai_agents_primary
       ON ai_agents(isPrimary);
+
+    CREATE TABLE IF NOT EXISTS memory_layers (
+      id TEXT PRIMARY KEY,
+      conversationId TEXT NOT NULL,
+      level INTEGER NOT NULL DEFAULT 1,
+      summary TEXT NOT NULL DEFAULT '',
+      startMessageId TEXT DEFAULT '',
+      endMessageId TEXT DEFAULT '',
+      createdAt TEXT NOT NULL,
+      FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memory_layers_conversation
+      ON memory_layers(conversationId, level);
   `);
 
   ensureColumn(db, "providers", "endpointType", "TEXT DEFAULT 'chat_completions'");

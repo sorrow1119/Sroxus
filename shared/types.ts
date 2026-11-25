@@ -206,7 +206,32 @@ export interface ChatErrorEvent {
 }
 
 export type ImageGenerationSize = string;
-export type ImageGenerationMode = "openai_images" | "chat_completions_image" | "gemini_generate_content";
+export type ImageGenerationMode = "openai_images" | "openai_image_edits" | "chat_completions_image" | "gemini_generate_content";
+
+export interface ImageAsset {
+  path: string;
+  name: string;
+  bytes: number;
+  modifiedAt: number;
+  error?: string;
+}
+
+export interface ImageHistoryEntry {
+  id: string;
+  createdAt: string;
+  status: "running" | "completed" | "partial" | "failed" | "interrupted";
+  input: ImageGenerationInput;
+  result?: ImageGenerationResult;
+  error?: string;
+}
+
+export interface ImagePromptInput {
+  providerId: string;
+  model: string;
+  prompt: string;
+  creative: boolean;
+  referencePaths?: string[];
+}
 
 export interface ImageGenerationInput {
   prompt: string;
@@ -214,9 +239,15 @@ export interface ImageGenerationInput {
   providerId?: string;
   model?: string;
   mode?: ImageGenerationMode;
+  creationMode?: "text" | "edit" | "reference";
+  protocolAutomatic?: boolean;
   endpointOverride?: string;
   size: ImageGenerationSize;
+  resolution?: "auto" | "1K" | "2K" | "4K";
   count: number;
+  referencePaths?: string[];
+  referenceMode?: "edit" | "reference";
+  aspectRatio?: "auto" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9" | "2:3" | "3:2" | "custom";
 }
 
 export interface GeneratedImage {
@@ -225,6 +256,8 @@ export interface GeneratedImage {
   revisedPrompt?: string;
   savedPath?: string;
   savedFileName?: string;
+  width?: number;
+  height?: number;
 }
 
 export interface ImageGenerationResult {
@@ -234,6 +267,54 @@ export interface ImageGenerationResult {
   prompt: string;
   images: GeneratedImage[];
   warning?: string;
+  sizeNote?: string;
+}
+
+export type VideoProtocol = "ark" | "openai_video" | "grok_video" | "newapi_video" | "muse_video";
+export type VideoMode = "text" | "first_frame" | "first_last_frame" | "reference_images";
+export interface VideoReferenceImage {
+  path: string;
+  purpose: "subject" | "scene" | "clothing" | "style" | "other";
+}
+export type VideoTaskStatus = "submitting" | "submission_unknown" | "queued" | "running" | "downloading" | "download_failed" | "completed" | "failed" | "cancelled" | "expired";
+
+export interface VideoGenerationInput {
+  providerId: string;
+  model: string;
+  prompt: string;
+  protocol: "auto" | VideoProtocol;
+  mode: VideoMode;
+  firstFramePath?: string;
+  lastFramePath?: string;
+  referenceImages?: VideoReferenceImage[];
+  duration: number;
+  aspectRatio: string;
+  resolution: string;
+  audio: "default" | "on" | "off";
+  seed?: number;
+  endpointOverride?: string;
+  queryEndpointOverride?: string;
+  downloadEndpointOverride?: string;
+}
+
+export interface VideoTask {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  providerName: string;
+  input: VideoGenerationInput;
+  protocol: VideoProtocol;
+  endpoint: string;
+  remoteId?: string;
+  status: VideoTaskStatus;
+  stage: "submit" | "query" | "download" | "cancel" | "recovery";
+  pollingPaused: boolean;
+  error?: string;
+  savedPath?: string;
+  savedFileName?: string;
+  playbackUrl?: string;
+  sourceName?: string;
+  diagnostic: string;
 }
 
 export interface ElectronAPI {
@@ -261,7 +342,7 @@ export interface ElectronAPI {
     delete: (id: string) => Promise<{ ok: true }>;
     setDefault: (id: string) => Promise<Provider>;
     testConnection: (provider: ProviderInput) => Promise<{ ok: boolean; message: string }>;
-    listModels: (provider: ProviderInput) => Promise<{ ok: boolean; models: string[]; message: string }>;
+    listModels: (provider: ProviderInput) => Promise<{ ok: boolean; models: string[]; modelCapabilities?: ModelCapabilitiesMap; message: string }>;
     benchmarkBaseUrls: (
       provider: ProviderInput,
     ) => Promise<{ ok: boolean; bestUrl: string | null; results: Array<{ url: string; ok: boolean; latencyMs: number | null; message: string }> }>;
@@ -301,6 +382,32 @@ export interface ElectronAPI {
   };
   images: {
     generate: (input: ImageGenerationInput) => Promise<ImageGenerationResult>;
+    chooseFolder: () => Promise<string | null>;
+    gallery: (folder: string) => Promise<ImageAsset[]>;
+    chooseReferences: (limit?: number) => Promise<ImageAsset[]>;
+    importReferences: (paths: string[], limit?: number) => Promise<ImageAsset[]>;
+    thumbnail: (filePath: string, variant?: "gallery" | "result") => Promise<string>;
+    preview: (filePath: string) => Promise<string>;
+    reveal: (filePath: string) => Promise<void>;
+    saveAs: (filePath: string) => Promise<string | null>;
+    history: () => Promise<ImageHistoryEntry[]>;
+    cancel: (id: string) => Promise<void>;
+    delete: (id: string) => Promise<void>;
+    improvePrompt: (input: ImagePromptInput) => Promise<string>;
+  };
+  videos: {
+    listModels: (providerId: string) => Promise<{ ok: boolean; models: string[]; message: string; museProtocol?: VideoProtocol }>;
+    create: (input: VideoGenerationInput) => Promise<VideoTask>;
+    history: () => Promise<VideoTask[]>;
+    refresh: (id: string) => Promise<VideoTask>;
+    pause: (id: string) => Promise<VideoTask>;
+    resume: (id: string) => Promise<VideoTask>;
+    cancel: (id: string) => Promise<VideoTask>;
+    delete: (id: string) => Promise<void>;
+    attach: (input: VideoGenerationInput, remoteId: string, localId?: string) => Promise<VideoTask>;
+    saveAs: (id: string) => Promise<string | null>;
+    reveal: (id: string) => Promise<void>;
+    improvePrompt: (input: ImagePromptInput) => Promise<string>;
   };
   chat: {
     sendMessage: (

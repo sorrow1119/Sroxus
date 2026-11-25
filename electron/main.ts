@@ -10,6 +10,7 @@ import { registerProvidersIpc } from "./ipc/providers";
 import { registerAgentsIpc } from "./ipc/agents";
 import { registerPluginsIpc } from "./ipc/plugins";
 import { registerImagesIpc } from "./ipc/images";
+import { registerVideosIpc } from "./ipc/videos";
 
 app.setName("Sroxus");
 
@@ -25,6 +26,7 @@ async function bootstrap() {
   registerDataIpc();
   registerPluginsIpc();
   registerImagesIpc();
+  registerVideosIpc();
   createMainWindow();
 
   app.on("activate", () => {

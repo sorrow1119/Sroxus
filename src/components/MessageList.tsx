@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { cloneElement, isValidElement, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode, RefObject } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
@@ -14,22 +15,114 @@ interface MessageListProps {
   generating: boolean;
   targetMessageId?: string | null;
   onTargetMessageHandled?: () => void;
+  searchQuery?: string;
+  searchMatches?: SearchMatchSpec[];
+  searchActiveIndex?: number | null;
   onRegenerate: (assistantMessageId: string, mode: RegenerateMode) => Promise<void> | void;
+  scrollContainerRef: RefObject<HTMLDivElement | null>;
+  onQuote: (quote: MessageQuote) => void;
 }
+
+export type MessageQuote = { messageId: string; author: string; text: string };
+type TextSelection = MessageQuote & { left: number; top: number };
 
 type RenderItem =
   | { type: "message"; message: Message }
   | { type: "group"; key: string; parentMessage?: Message; messages: Message[] };
 
-export default function MessageList({ messages, hasConversation, generating, targetMessageId, onTargetMessageHandled, onRegenerate }: MessageListProps) {
+export type SearchMatchSpec = { messageId: string; globalStart: number; count: number };
+
+export default function MessageList({
+  messages,
+  hasConversation,
+  generating,
+  targetMessageId,
+  onTargetMessageHandled,
+  searchQuery = "",
+  searchMatches = [],
+  searchActiveIndex = null,
+  onRegenerate,
+  scrollContainerRef,
+  onQuote,
+}: MessageListProps) {
   const { t } = useI18n();
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [selection, setSelection] = useState<TextSelection | null>(null);
+  const [copyNotice, setCopyNotice] = useState("");
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const followingBottom = useRef(true);
+  const selecting = useRef(false);
+  const messageRef = useRef(messages);
+  messageRef.current = messages;
   const items = useMemo(() => buildRenderItems(messages), [messages]);
+  const searchStartByMessageId = useMemo(() => {
+    const map = new Map<string, SearchMatchSpec>();
+    for (const item of searchMatches) {
+      map.set(item.messageId, item);
+    }
+    return map;
+  }, [searchMatches]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages]);
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const onScroll = () => { followingBottom.current = container.scrollHeight - container.scrollTop - container.clientHeight < 64; };
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => container.removeEventListener("scroll", onScroll);
+  }, [scrollContainerRef]);
+
+  useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (container && followingBottom.current && !selecting.current && !window.getSelection()?.toString()) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [messages, scrollContainerRef]);
+
+  useEffect(() => {
+    const capture = () => {
+      const selected = window.getSelection();
+      if (!selected || selected.isCollapsed || !selected.rangeCount) { setSelection(null); return; }
+      const range = selected.getRangeAt(0);
+      const contentAt = (node: Node) => (node instanceof Element ? node : node.parentElement)?.closest<HTMLElement>("[data-message-content]");
+      const start = contentAt(range.startContainer), end = contentAt(range.endContainer);
+      if (!start || start !== end || !listRef.current?.contains(start)) { setSelection(null); return; }
+      const text = selected.toString();
+      const message = messageRef.current.find((item) => item.id === start.dataset.messageContent);
+      if (!text.trim() || !message) { setSelection(null); return; }
+      const rect = range.getBoundingClientRect();
+      const next = { messageId: message.id, author: message.role === "user" ? t("messages.you") : message.agentName || "AI", text, left: Math.max(8, Math.min(rect.left, window.innerWidth - 260)), top: Math.max(8, Math.min(rect.top >= 48 ? rect.top - 42 : rect.bottom + 8, window.innerHeight - 44)) };
+      setSelection((old) => old && Object.keys(next).every((key) => old[key as keyof TextSelection] === next[key as keyof TextSelection]) ? old : next);
+    };
+    const onDown = (event: PointerEvent) => {
+      if ((event.target as Element).closest?.("[data-selection-toolbar]")) return;
+      selecting.current = Boolean((event.target as Element).closest?.("[data-message-content]"));
+    };
+    const onUp = () => { selecting.current = false; capture(); };
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") { window.getSelection()?.removeAllRanges(); setSelection(null); } };
+    document.addEventListener("selectionchange", capture);
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onUp);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", capture);
+    window.addEventListener("scroll", capture, true);
+    return () => {
+      document.removeEventListener("selectionchange", capture);
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onUp);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", capture);
+      window.removeEventListener("scroll", capture, true);
+    };
+  }, [t]);
+
+  useEffect(() => {
+    if (!copyNotice) return;
+    const timer = window.setTimeout(() => setCopyNotice(""), 2400);
+    return () => window.clearTimeout(timer);
+  }, [copyNotice]);
 
   useEffect(() => {
     if (!targetMessageId || !messages.some((message) => message.id === targetMessageId)) {
@@ -44,6 +137,16 @@ export default function MessageList({ messages, hasConversation, generating, tar
     }, 120);
     return () => window.clearTimeout(timer);
   }, [messages, onTargetMessageHandled, targetMessageId]);
+
+  useEffect(() => {
+    if (searchActiveIndex === null || searchActiveIndex < 0 || !searchMatches.length) {
+      return;
+    }
+    const node = document.querySelector<HTMLElement>(`[data-search-index="${searchActiveIndex}"]`);
+    if (node) {
+      node.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [searchActiveIndex, searchMatches]);
 
   if (!hasConversation) {
     return (
@@ -68,7 +171,7 @@ export default function MessageList({ messages, hasConversation, generating, tar
   }
 
   return (
-    <div className="space-y-5 p-6">
+    <div ref={listRef} className="space-y-5 p-6">
       {items.map((item) =>
         item.type === "group" ? (
           <AgentResultGroup
@@ -78,7 +181,18 @@ export default function MessageList({ messages, hasConversation, generating, tar
             generating={generating}
             onRegenerate={onRegenerate}
             renderMessage={(message) => (
-              <MessageBubble message={message} generating={generating} highlighted={message.id === highlightedId} onRegenerate={onRegenerate} inGroup />
+              <MessageBubble
+                message={message}
+                generating={generating}
+                highlighted={message.id === highlightedId}
+                onRegenerate={onRegenerate}
+                onQuote={onQuote}
+                selectionPaused={selection?.messageId === message.id}
+                inGroup
+                searchQuery={searchQuery}
+                searchStart={searchStartByMessageId.get(message.id)?.globalStart ?? 0}
+                searchActiveIndex={searchQuery.trim() ? searchActiveIndex : null}
+              />
             )}
           />
         ) : (
@@ -88,11 +202,21 @@ export default function MessageList({ messages, hasConversation, generating, tar
             generating={generating}
             highlighted={item.message.id === highlightedId}
             onRegenerate={onRegenerate}
+            onQuote={onQuote}
+            selectionPaused={selection?.messageId === item.message.id}
             inGroup={false}
+            searchQuery={searchQuery}
+            searchStart={searchStartByMessageId.get(item.message.id)?.globalStart ?? 0}
+            searchActiveIndex={searchQuery.trim() ? searchActiveIndex : null}
           />
         ),
       )}
       <div ref={bottomRef} />
+      {selection && <div data-selection-toolbar role="toolbar" aria-label={t("messages.selectionActions")} className="chat-selection-toolbar" style={{ left: selection.left, top: selection.top }} onMouseDown={(event) => event.preventDefault()}>
+        <button type="button" onClick={() => { void navigator.clipboard.writeText(selection.text).then(() => setCopyNotice(t("messages.copied")), () => setCopyNotice(t("messages.copyFailed"))); }}>{t("messages.copySelection")}</button>
+        <button type="button" onClick={() => { onQuote({ messageId: selection.messageId, author: selection.author, text: selection.text }); window.getSelection()?.removeAllRanges(); setSelection(null); }}>{t("messages.quoteSelection")}</button>
+      </div>}
+      {copyNotice && <div role="status" className="chat-copy-notice" onClick={() => setCopyNotice("")}>{copyNotice}</div>}
     </div>
   );
 }
@@ -131,18 +255,28 @@ function buildRenderItems(messages: Message[]): RenderItem[] {
   return result;
 }
 
-function MessageBubble({
+const MessageBubble = memo(function MessageBubble({
   message,
   generating,
   highlighted,
   onRegenerate,
+  onQuote,
+  selectionPaused,
   inGroup,
+  searchQuery,
+  searchStart,
+  searchActiveIndex,
 }: {
   message: Message;
   generating: boolean;
   highlighted: boolean;
   onRegenerate: (assistantMessageId: string, mode: RegenerateMode) => Promise<void> | void;
+  onQuote: (quote: MessageQuote) => void;
+  selectionPaused: boolean;
   inGroup: boolean;
+  searchQuery: string;
+  searchStart: number;
+  searchActiveIndex: number | null;
 }) {
   const { t } = useI18n();
   const isUser = message.role === "user";
@@ -162,7 +296,7 @@ function MessageBubble({
         >
           {message.compressed && <div className="mb-2 inline-flex rounded bg-[#2b3240] px-1.5 py-0.5 text-xs text-slate-400">{t("messages.compressed")}</div>}
           {!isUser && message.agentName && <AgentHeader name={message.agentName} />}
-          <MessageBody message={message} />
+          <MessageBody message={message} selectionPaused={selectionPaused} searchQuery={searchQuery} searchStart={searchStart} searchActiveIndex={searchActiveIndex} />
           {message.status === "sending" && <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-slate-300 align-middle" />}
           {message.status === "error" && <div className="mt-2 text-xs text-rose-300">{t("messages.failed")}</div>}
         </div>
@@ -170,6 +304,9 @@ function MessageBubble({
         <div className="mt-2 flex flex-wrap gap-2 text-xs">
           <ActionButton disabled={false} onClick={() => navigator.clipboard.writeText(message.content)}>
             {t("messages.copy")}
+          </ActionButton>
+          <ActionButton disabled={!message.content.trim()} onClick={() => onQuote({ messageId: message.id, author: isUser ? t("messages.you") : message.agentName || "AI", text: message.content })}>
+            {t("messages.quote")}
           </ActionButton>
         </div>
 
@@ -189,7 +326,7 @@ function MessageBubble({
       </div>
     </div>
   );
-}
+});
 
 function messageDomId(messageId: string) {
   return `message-${messageId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
@@ -203,16 +340,32 @@ function AgentHeader({ name }: { name: string }) {
   );
 }
 
-function MessageBody({ message }: { message: Message }) {
+function MessageBody({
+  message,
+  selectionPaused,
+  searchQuery,
+  searchStart,
+  searchActiveIndex,
+}: {
+  message: Message;
+  selectionPaused: boolean;
+  searchQuery: string;
+  searchStart: number;
+  searchActiveIndex: number | null;
+}) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
-  const content = message.content || (message.status === "sending" ? " " : "");
+  const stableContent = useRef(message.content);
+  if (!selectionPaused) stableContent.current = message.content;
+  const content = stableContent.current || (message.status === "sending" ? " " : "");
   const tooLong = content.length > 1600;
   const visible = tooLong && !expanded ? `${content.slice(0, 1600)}\n\n...` : content;
 
   return (
     <>
-      <MarkdownContent content={visible} />
+      <div className="chat-message-content" data-message-content={message.id}>
+        <MarkdownContent content={visible} searchQuery={searchQuery} searchStart={searchStart} searchActiveIndex={searchActiveIndex} />
+      </div>
       <AttachmentList attachments={message.attachments ?? []} />
       {tooLong && (
         <button
@@ -301,8 +454,21 @@ function extractText(value: unknown): string {
   return "";
 }
 
-function MarkdownContent({ content }: { content: string }) {
+const MarkdownContent = memo(function MarkdownContent({
+  content,
+  searchQuery,
+  searchStart,
+  searchActiveIndex,
+}: {
+  content: string;
+  searchQuery: string;
+  searchStart: number;
+  searchActiveIndex: number | null;
+}) {
   const { t } = useI18n();
+  const counter = { value: 0 };
+  const remap = (children: ReactNode) =>
+    searchQuery.trim() ? highlightChildren(children, searchQuery, searchStart, searchActiveIndex, counter) : children;
 
   return (
     <div className="prose prose-invert max-w-none break-words prose-pre:my-3 prose-pre:bg-transparent prose-code:before:content-none prose-code:after:content-none">
@@ -310,6 +476,24 @@ function MarkdownContent({ content }: { content: string }) {
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
         components={{
+          p: ({ children }) => <p>{remap(children)}</p>,
+          h1: ({ children }) => <h1>{remap(children)}</h1>,
+          h2: ({ children }) => <h2>{remap(children)}</h2>,
+          h3: ({ children }) => <h3>{remap(children)}</h3>,
+          h4: ({ children }) => <h4>{remap(children)}</h4>,
+          h5: ({ children }) => <h5>{remap(children)}</h5>,
+          h6: ({ children }) => <h6>{remap(children)}</h6>,
+          li: ({ children }) => <li>{remap(children)}</li>,
+          blockquote: ({ children }) => <blockquote>{remap(children)}</blockquote>,
+          td: ({ children }) => <td>{remap(children)}</td>,
+          th: ({ children }) => <th>{remap(children)}</th>,
+          strong: ({ children }) => <strong>{remap(children)}</strong>,
+          em: ({ children }) => <em>{remap(children)}</em>,
+          a: ({ children, ...rest }) => (
+            <a {...rest} target="_blank" rel="noreferrer">
+              {remap(children)}
+            </a>
+          ),
           code(props) {
             const { children, className, ...rest } = props;
             const inline = !className;
@@ -343,6 +527,64 @@ function MarkdownContent({ content }: { content: string }) {
       </ReactMarkdown>
     </div>
   );
+});
+
+function highlightChildren(
+  children: ReactNode,
+  query: string,
+  start: number,
+  activeGlobalIndex: number | null,
+  counter: { value: number },
+): ReactNode {
+  if (Array.isArray(children)) {
+    return children.map((child) => highlightChildren(child, query, start, activeGlobalIndex, counter));
+  }
+  if (typeof children === "string") {
+    return highlightString(children, query, start, activeGlobalIndex, counter);
+  }
+  if (isValidElement<{ children?: ReactNode }>(children)) {
+    return cloneElement(children, {}, highlightChildren(children.props.children, query, start, activeGlobalIndex, counter));
+  }
+  return children;
+}
+
+function highlightString(text: string, query: string, start: number, activeGlobalIndex: number | null, counter: { value: number }): ReactNode {
+  const lowerQuery = query.trim().toLowerCase();
+  if (!lowerQuery) {
+    return text;
+  }
+  const lower = text.toLowerCase();
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  while (cursor < lower.length) {
+    const found = lower.indexOf(lowerQuery, cursor);
+    if (found < 0) {
+      if (cursor < lower.length) {
+        parts.push(text.slice(cursor));
+      }
+      break;
+    }
+    if (found > cursor) {
+      parts.push(text.slice(cursor, found));
+    }
+    const globalIndex = start + counter.value;
+    counter.value += 1;
+    parts.push(
+      <mark
+        key={`search-${globalIndex}`}
+        data-search-index={globalIndex}
+        className={
+          activeGlobalIndex === globalIndex
+            ? "rounded bg-amber-300 px-0.5 text-black ring-2 ring-amber-300"
+            : "rounded bg-amber-400/45 px-0.5 text-inherit"
+        }
+      >
+        {text.slice(found, found + lowerQuery.length)}
+      </mark>,
+    );
+    cursor = found + lowerQuery.length;
+  }
+  return <>{parts}</>;
 }
 
 function formatBytes(bytes: number) {

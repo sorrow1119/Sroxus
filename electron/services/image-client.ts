@@ -1,18 +1,22 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { GeneratedImage, ImageGenerationInput, ImageGenerationMode, ImageGenerationResult, ProviderInput } from "../../shared/types";
+import { getImageConfigurationError, getImageInputError, resolveImageInput } from "../../shared/image-configuration";
+import { imageDimensions, readReference, writeGeneratedImage } from "./image-assets";
+import { resolveImageSizing } from "../../shared/image-sizing";
 import { sanitizeForLog } from "./privacy-filter";
 import { getStoragePath } from "./storage-path";
 
 type ProbeResult =
   | { ok: true; value: ImageGenerationResult }
-  | { ok: false; retryWithoutBase64?: boolean; retryWithoutNegativePrompt?: boolean; message: string };
+  | { ok: false; tryNextEndpoint?: boolean; retryWithoutBase64?: boolean; retryWithoutNegativePrompt?: boolean; message: string };
 
 export class OpenAICompatibleImageClient {
-  constructor(private readonly provider: ProviderInput) {}
+  constructor(private readonly provider: ProviderInput, private readonly signal?: AbortSignal) {}
 
   async generate(input: ImageGenerationInput): Promise<ImageGenerationResult> {
-    const mode = input.mode ?? "openai_images";
+    input = resolveImageInput(input, this.provider.model);
+    const mode = input.mode!;
     const model = this.provider.model.trim();
     const prompt = input.prompt.trim();
 
@@ -26,6 +30,17 @@ export class OpenAICompatibleImageClient {
       throw new Error("请输入生图提示词。");
     }
 
+    const configurationError = getImageConfigurationError(this.provider.baseUrl, mode, input.endpointOverride);
+    if (configurationError) throw new Error(configurationError);
+    const inputError = getImageInputError(input);
+    if (inputError) throw new Error(inputError);
+    const references = await Promise.all((input.referencePaths ?? []).map(readReference));
+    const sizing = resolveImageSizing({ ...input, model }, references[0]);
+    if ((mode === "gemini_generate_content" || (mode === "chat_completions_image" && /gemini|banana/i.test(model))) && sizing.size !== "auto" && !sizing.aspectRatio) {
+      throw new Error("尺寸检查：该 Gemini 接口按常用比例输出，不支持此自定义比例；请选择 1:1、3:4、4:3、9:16、16:9、2:3 或 3:2。");
+    }
+    const effectiveInput = { ...input, model, resolution: input.aspectRatio === "custom" ? "auto" as const : input.resolution, size: sizing.size, aspectRatio: sizing.aspectRatio ?? (sizing.size === "auto" ? "auto" as const : "custom" as const) };
+
     const requestedCount = Math.max(1, Math.min(4, Math.trunc(input.count || 1)));
     const images: GeneratedImage[] = [];
     const errors: string[] = [];
@@ -33,11 +48,14 @@ export class OpenAICompatibleImageClient {
 
     for (let index = 0; index < requestedCount && images.length < requestedCount; index += 1) {
       try {
-        const single = await this.generateSingle({ ...input, count: 1 }, mode, model);
+        this.signal?.throwIfAborted();
+        const single = await this.generateSingle({ ...effectiveInput, count: 1 }, mode, model);
         resultMeta ??= single;
         images.push(...single.images.slice(0, requestedCount - images.length));
       } catch (error) {
         errors.push(error instanceof Error ? error.message : String(error));
+        // A failed generation may already have consumed quota. Do not repeat it for the remaining count.
+        break;
       }
     }
 
@@ -50,6 +68,7 @@ export class OpenAICompatibleImageClient {
       ...resultMeta,
       prompt: input.prompt,
       images,
+      sizeNote: `请求：${sizing.label}；实际：${images.map((image) => image.width && image.height ? `${image.width}×${image.height}` : "未知").join("、")}${sizing.aspectRatio && images.some((image) => image.width && image.height && Math.abs(image.width / image.height / ratioValue(sizing.aspectRatio!) - 1) > 0.04) ? "（服务端返回比例与请求不一致）" : ""}${input.aspectRatio === "custom" && /gemini|banana/i.test(model) ? "；Gemini 按比例生成，不保证精确像素" : ""}`,
       ...(missingCount > 0
         ? { warning: `请求生成 ${requestedCount} 张，成功 ${images.length} 张，失败 ${missingCount} 张。${errors[0] ? `\n${errors[0]}` : ""}` }
         : {}),
@@ -65,6 +84,7 @@ export class OpenAICompatibleImageClient {
         { requestBase64: true, nativeNegativePrompt: useNativeNegativePrompt },
       ];
       const tried = new Set<string>();
+      let tryNextEndpoint = false;
 
       while (queue.length) {
         const attempt = queue.shift()!;
@@ -75,6 +95,7 @@ export class OpenAICompatibleImageClient {
         const result = await this.tryGenerate(endpoint, input, mode, attempt.requestBase64, attempt.nativeNegativePrompt);
         if (result.ok) return result.value;
         lastError = result.message;
+        tryNextEndpoint = result.tryNextEndpoint === true;
 
         if (mode === "openai_images" && attempt.requestBase64 && result.retryWithoutBase64) {
           queue.push({ ...attempt, requestBase64: false });
@@ -83,6 +104,8 @@ export class OpenAICompatibleImageClient {
           queue.push({ ...attempt, nativeNegativePrompt: false });
         }
       }
+      // A valid endpoint's task/auth/network failure must not trigger another generation.
+      if (!tryNextEndpoint) throw new Error(lastError);
     }
 
     throw new Error(lastError);
@@ -97,27 +120,57 @@ export class OpenAICompatibleImageClient {
   ): Promise<ProbeResult> {
     let response: Response;
     try {
+      const headers: Record<string, string> = this.headers();
+      let body: BodyInit;
+      if (mode === "openai_image_edits") {
+        const form = new FormData();
+        form.set("model", this.provider.model);
+        form.set("prompt", promptWithNegative(input));
+        form.set("n", "1");
+        form.set("size", input.size);
+        for (const filePath of input.referencePaths ?? []) {
+          const ref = await readReference(filePath);
+          form.append(input.referencePaths!.length === 1 ? "image" : "image[]", new Blob([new Uint8Array(ref.buffer)], { type: ref.mime }), ref.uploadName);
+        }
+        delete headers["Content-Type"];
+        body = form;
+      } else {
+        body = JSON.stringify(await buildPayload(this.provider.model, input, mode, requestBase64, useNativeNegativePrompt));
+      }
       response = await fetch(endpoint, {
         method: "POST",
-        headers: this.headers(),
-        body: JSON.stringify(buildPayload(this.provider.model, input, mode, requestBase64, useNativeNegativePrompt)),
-        signal: AbortSignal.timeout(120000),
+        headers,
+        body,
+        signal: this.signal ? AbortSignal.any([this.signal, AbortSignal.timeout(600000)]) : AbortSignal.timeout(600000),
       });
     } catch (error) {
-      return { ok: false, message: explainImageFetchError(error) };
+      const message = explainImageFetchError(error);
+      return { ok: false, message: `${message}\n日志: ${saveImageRawResponse("network-error", endpoint, message, { mode, model: this.provider.model })}` };
     }
 
-    const rawText = await response.text().catch(() => "");
+    let rawText: string;
+    try {
+      rawText = await response.text();
+    } catch (error) {
+      const message = explainImageFetchError(error);
+      return { ok: false, message: `读取生图响应失败：${message}\n日志: ${saveImageRawResponse("read-error", endpoint, message, { mode, model: this.provider.model, status: response.status })}` };
+    }
     if (!response.ok) {
       return {
         ok: false,
+        tryNextEndpoint: isMissingImageRoute(response.status, rawText),
         retryWithoutBase64: mode === "openai_images" && requestBase64 && shouldRetryWithoutBase64(response.status, rawText),
-        retryWithoutNegativePrompt: useNativeNegativePrompt && (response.status === 400 || response.status === 422),
-        message: `${explainImageHttpError(response.status, rawText)}\n日志: ${saveImageRawResponse("http-error", endpoint, rawText)}`,
+        retryWithoutNegativePrompt: useNativeNegativePrompt && (response.status === 400 || response.status === 422) && /negative_prompt/i.test(rawText),
+        message: `${explainImageHttpError(response.status, rawText)}\n日志: ${saveImageRawResponse("http-error", endpoint, rawText, { status: response.status, mode, model: this.provider.model })}`,
       };
     }
 
-    const images = await saveGeneratedImages(parseAnyImageResponse(rawText).slice(0, 1));
+    let parsed: GeneratedImage[];
+    try { parsed = parseAnyImageResponse(rawText).slice(0, 1); }
+    catch {
+      return { ok: false, message: `响应解析失败：返回内容不是有效 JSON。\n日志: ${saveImageRawResponse("parse-failed", endpoint, rawText, { status: response.status, mode, model: this.provider.model })}` };
+    }
+    const images = await saveGeneratedImages(parsed, input.referencePaths?.[0]);
     if (images.length) {
       return {
         ok: true,
@@ -133,8 +186,7 @@ export class OpenAICompatibleImageClient {
 
     return {
       ok: false,
-      retryWithoutBase64: mode === "openai_images" && requestBase64,
-      message: `图片接口返回格式无法识别。\n日志: ${saveImageRawResponse("parse-failed", endpoint, rawText)}`,
+      message: `图片接口返回格式无法识别。\n日志: ${saveImageRawResponse("parse-failed", endpoint, rawText, { status: response.status, mode, model: this.provider.model })}`,
     };
   }
 
@@ -146,7 +198,7 @@ export class OpenAICompatibleImageClient {
   }
 }
 
-function buildPayload(
+async function buildPayload(
   model: string,
   input: ImageGenerationInput,
   mode: ImageGenerationMode,
@@ -154,12 +206,18 @@ function buildPayload(
   useNativeNegativePrompt: boolean,
 ) {
   const prompt = useNativeNegativePrompt ? input.prompt.trim() : promptWithNegative(input);
+  const references = await Promise.all((input.referencePaths ?? []).map(readReference));
+  const sizing = resolveImageSizing(input, references[0]);
 
   if (mode === "chat_completions_image") {
     return {
       model,
-      messages: [{ role: "user", content: prompt }],
+      messages: [{ role: "user", content: references.length ? [
+        { type: "text", text: prompt },
+        ...references.map((reference) => ({ type: "image_url", image_url: { url: reference.dataUrl } })),
+      ] : prompt }],
       stream: false,
+      ...(sizing.aspectRatio || (input.resolution && input.resolution !== "auto") ? { image_config: { ...(sizing.aspectRatio ? { aspect_ratio: sizing.aspectRatio } : {}), ...(input.resolution && input.resolution !== "auto" ? { image_size: input.resolution } : {}) } } : {}),
     };
   }
 
@@ -168,11 +226,12 @@ function buildPayload(
       contents: [
         {
           role: "user",
-          parts: [{ text: prompt }],
+          parts: [{ text: prompt }, ...references.map((reference) => ({ inlineData: { mimeType: reference.mime, data: reference.buffer.toString("base64") } }))],
         },
       ],
       generationConfig: {
         candidateCount: Math.max(1, Math.min(4, input.count)),
+        ...(sizing.aspectRatio || (input.resolution && input.resolution !== "auto") ? { imageConfig: { ...(sizing.aspectRatio ? { aspectRatio: sizing.aspectRatio } : {}), ...(input.resolution && input.resolution !== "auto" ? { imageSize: input.resolution } : {}) } } : {}),
       },
     };
   }
@@ -187,8 +246,13 @@ function buildPayload(
   };
 }
 
+function ratioValue(value: string) { const [width, height] = value.split(":").map(Number); return width / height; }
+
 function promptWithNegative(input: ImageGenerationInput) {
-  const prompt = input.prompt.trim();
+  const intent = input.referencePaths?.length ? (input.referenceMode === "reference"
+    ? "以所附图片作为视觉参考，按照以下要求创作新图。"
+    : "直接编辑所附原图，只修改明确要求的内容，尽量保留其余主体、构图和细节。") : "";
+  const prompt = intent ? `${intent}\n${input.prompt.trim()}` : input.prompt.trim();
   const negativePrompt = input.negativePrompt?.trim();
   return negativePrompt ? `${prompt}\n\n请避免图片中出现以下内容：${negativePrompt}` : prompt;
 }
@@ -201,6 +265,15 @@ function endpointCandidates(baseUrl: string, mode: ImageGenerationMode, model: s
 
   const base = normalizeBase(baseUrl);
   const root = rootBase(base);
+
+  if (mode === "openai_image_edits") {
+    return unique([
+      base.endsWith("/images/edits") ? base : "",
+      base.endsWith("/v1") ? `${base}/images/edits` : "",
+      `${root}/v1/images/edits`,
+      `${root}/images/edits`,
+    ]);
+  }
 
   if (mode === "chat_completions_image") {
     return unique([
@@ -307,30 +380,21 @@ function dedupeImages(images: GeneratedImage[]) {
   });
 }
 
-async function saveGeneratedImages(images: GeneratedImage[]) {
+async function saveGeneratedImages(images: GeneratedImage[], source?: string) {
   const saved: GeneratedImage[] = [];
-  const now = new Date();
-  const day = now.toISOString().slice(0, 10);
-  const dir = path.join(getStoragePath(), "generated-images", day);
-  fs.mkdirSync(dir, { recursive: true });
-
-  for (const [index, image] of images.entries()) {
-    const file = await imageToFile(image, dir, now, index + 1).catch(() => null);
-    saved.push(file ? { ...image, savedPath: file.path, savedFileName: file.name } : image);
+  for (const image of images) {
+    const data = image.dataUrl ? dataUrlToBuffer(image.dataUrl) : image.url ? await urlToBuffer(image.url) : null;
+    if (!data) throw new Error("图片下载阶段失败：接口已返回图片地址，但未能下载；请检查服务商记录，避免重复扣费。");
+    try {
+      const file = writeGeneratedImage(data.buffer, data.ext, source);
+      const dimensions = await imageDimensions(data.buffer);
+      saved.push({ ...image, savedPath: file.path, savedFileName: file.name, ...dimensions });
+    } catch (error) {
+      throw new Error(`图片保存阶段失败：${error instanceof Error ? error.message : String(error)}。接口可能已扣费，请检查存储目录。`);
+    }
   }
 
   return saved;
-}
-
-async function imageToFile(image: GeneratedImage, dir: string, date: Date, index: number) {
-  const data = image.dataUrl ? dataUrlToBuffer(image.dataUrl) : image.url ? await urlToBuffer(image.url) : null;
-  if (!data) return null;
-
-  const stamp = date.toISOString().replace(/[:.]/g, "-");
-  const fileName = `sroxus-image-${stamp}-${String(index).padStart(2, "0")}.${data.ext}`;
-  const filePath = path.join(dir, fileName);
-  fs.writeFileSync(filePath, data.buffer);
-  return { path: filePath, name: fileName };
 }
 
 function dataUrlToBuffer(dataUrl: string) {
@@ -374,6 +438,7 @@ function rootBase(value: string) {
     .replace(/\/responses$/, "")
     .replace(/\/models$/, "")
     .replace(/\/images\/generations$/, "")
+    .replace(/\/images\/edits$/, "")
     .replace(/\/v1beta\/[^/]+:generateContent$/, "")
     .replace(/\/v1beta$/, "")
     .replace(/\/v1$/, "");
@@ -391,6 +456,7 @@ function unique(values: string[]) {
 }
 
 function modeHint(mode: ImageGenerationMode) {
+  if (mode === "openai_image_edits") return "图生图接口不可用，请确认该模型和服务商支持 /v1/images/edits。";
   if (mode === "chat_completions_image") return "Chat Completions 生图接口不可用，请确认该模型支持通过 /v1/chat/completions 返回图片。";
   if (mode === "gemini_generate_content") return "Gemini GenerateContent 生图接口不可用，请确认 endpoint 类似 /v1beta/{model}:generateContent。";
   return "OpenAI Images 生图接口不可用，请确认该模型和服务商支持 /v1/images/generations。";
@@ -398,15 +464,31 @@ function modeHint(mode: ImageGenerationMode) {
 
 function shouldRetryWithoutBase64(status: number, text: string) {
   const lower = text.toLowerCase();
-  return status === 400 || status === 422 || lower.includes("response_format") || lower.includes("b64_json");
+  return (status === 400 || status === 422) && (lower.includes("response_format") || lower.includes("b64_json"));
+}
+
+function isMissingImageRoute(status: number, text: string) {
+  if (status !== 404 && status !== 405) return false;
+  try {
+    const body = JSON.parse(text) as { detail?: unknown; message?: unknown; error?: unknown };
+    const detail = body.detail ?? body.message ?? body.error;
+    return typeof detail === "string" && /^(not found|method not allowed)\.?$/i.test(detail.trim());
+  } catch {
+    return !text.trim() || /^(not found|method not allowed)\.?$/i.test(text.trim()) ||
+      (/<html[\s>]/i.test(text) && /404|405|not found|method not allowed/i.test(text));
+  }
 }
 
 function explainImageHttpError(status: number, text: string) {
   const body = sanitizeForLog(text.slice(0, 800));
+  if (/浏览器插件未连接|browser.*(?:not connected|disconnected)/i.test(text)) return `生图服务的浏览器插件未连接，请在对应浏览器连接插件后重试。${body}`;
+  if (/use \*_sync image models/i.test(text)) return `当前服务要求使用 *_sync 生图模型，请在该服务的模型列表中选择对应型号。${body}`;
+  if (/Invalid API key/i.test(text)) return `认证失败：目标生图服务不接受当前 API Key，请核对服务商、目标地址及对应密钥。${body}`;
   if (status === 401) return `认证失败，请检查 API Key。${body}`;
   if (status === 403) return `当前账号无权限，或该模型不支持生图。${body}`;
   if (status === 404) return `图片接口、Base URL 或模型名不存在。${body}`;
   if (status === 429) return `触发限流，请稍后重试。${body}`;
+  if (status === 402) return `生图计费阶段失败：余额、订阅或消费额度受限 (HTTP 402)。${body}`;
   return `图片生成请求失败：HTTP ${status} ${body}`;
 }
 
@@ -422,14 +504,19 @@ function explainImageFetchError(error: unknown) {
   return String(error);
 }
 
-function saveImageRawResponse(kind: string, endpoint: string, content: string) {
-  const dir = path.join(getStoragePath(), "logs", "images");
-  fs.mkdirSync(dir, { recursive: true });
-  const filePath = path.join(dir, `${kind}-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
-  fs.writeFileSync(
-    filePath,
-    JSON.stringify({ kind, endpoint, createdAt: new Date().toISOString(), content: sanitizeForLog(content.slice(0, 200000)) }, null, 2),
-    "utf-8",
-  );
-  return filePath;
+function saveImageRawResponse(kind: string, endpoint: string, content: string, metadata: { status?: number; mode?: ImageGenerationMode; model?: string } = {}) {
+  // Do not persist credentials in URL query strings, even with custom endpoints.
+  let safeEndpoint = endpoint;
+  try { const url = new URL(endpoint); url.username = ""; url.password = ""; url.search = ""; url.hash = ""; safeEndpoint = url.toString(); } catch { safeEndpoint = "[invalid endpoint]"; }
+  try {
+    const dir = path.join(getStoragePath(), "logs", "images");
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `${kind}-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({ kind, endpoint: safeEndpoint, ...metadata, createdAt: new Date().toISOString(), content: sanitizeForLog(content.slice(0, 200000)) }, null, 2),
+      "utf-8",
+    );
+    return filePath;
+  } catch { return "日志写入失败（请检查存储目录权限）；原始错误见上文"; }
 }

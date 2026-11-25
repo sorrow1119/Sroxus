@@ -1,4 +1,5 @@
-﻿import { useCallback, useEffect, useMemo, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { defaultModelCapabilities } from "../../shared/model-capabilities";
 import type { Conversation, Message, ModelCapability, Provider } from "../../shared/types";
 
 export interface ModelChoice {
@@ -23,6 +24,8 @@ export function useChatStore() {
   const [compressionNoticeEnabled, setCompressionNoticeEnabled] = useState(true);
   const [ignoredCompressionConversationId, setIgnoredCompressionConversationId] = useState<string | null>(null);
   const [ignoredCompressionSignature, setIgnoredCompressionSignature] = useState("");
+
+  const activeConversationIdRef = useRef<string | null>(null);
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === activeConversationId) ?? null,
@@ -135,6 +138,10 @@ export function useChatStore() {
   }, [refreshConversations, refreshProviders]);
 
   useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  useEffect(() => {
     void loadMessages(activeConversationId);
     void restoreModelForConversation(activeConversationId);
     setCompressionMessage(null);
@@ -146,30 +153,34 @@ export function useChatStore() {
     const offDelta = window.electronAPI.chat.onDelta((event) => {
       setMessages((current) => {
         if (current.some((message) => message.id === event.messageId)) {
-          return current.map((message) => (message.id === event.messageId ? { ...message, content: event.content } : message));
+          return current.map((message) =>
+            message.id === event.messageId && message.conversationId === event.conversationId
+              ? { ...message, content: event.content }
+              : message,
+          );
         }
-        return [
-          ...current,
-          {
-            id: event.messageId,
-            conversationId: event.conversationId,
-            role: "assistant",
-            content: event.content,
-            compressed: false,
-            createdAt: new Date().toISOString(),
-            status: "sending",
-            attachments: [],
-          },
-        ];
+        return [...current];
       });
     });
     const offDone = window.electronAPI.chat.onDone((event) => {
+      if (event.conversationId !== activeConversationIdRef.current) {
+        // 事件属于其他会话：不更新当前消息列表，但生成状态必须复位，
+        // 否则 generating 永远卡在 true，输入框会被禁用到下次生成结束。
+        setGenerating(false);
+        void refreshConversations();
+        return;
+      }
       setMessages((current) => upsertMessage(current, event.message));
       setGenerating(false);
       setIgnoredCompressionSignature("");
       void refreshConversations();
     });
     const offError = window.electronAPI.chat.onError((event) => {
+      if (event.conversationId !== activeConversationIdRef.current) {
+        setGenerating(false);
+        void refreshConversations();
+        return;
+      }
       setMessages((current) => upsertMessage(current, event.message));
       setGenerating(false);
       setIgnoredCompressionSignature("");
@@ -271,11 +282,14 @@ export function useChatStore() {
           selectedModel?.model,
         );
         const assistantMessages = result.assistantMessages?.length ? result.assistantMessages : [result.assistantMessage];
-        setMessages((current) => [...current, result.userMessage, ...assistantMessages]);
+        if (activeConversationIdRef.current === conversationId) {
+          setMessages((current) => [...current, result.userMessage, ...assistantMessages]);
+        }
         await refreshConversations();
       } catch (error) {
         setGenerating(false);
-        window.alert(friendlyError(error));
+        // Let the composer restore the failed draft and show an inline error.
+        throw new Error(friendlyError(error));
       }
     },
     [activeConversationId, generating, refreshConversations, selectedModel],
@@ -409,7 +423,7 @@ function flattenModelChoices(providers: Provider[]): ModelChoice[] {
       providerName: provider.name,
       model,
       label: `${provider.name} / ${model}`,
-      capabilities: provider.modelCapabilities?.[model] ?? inferModelCapabilities(model),
+      capabilities: provider.modelCapabilities?.[model] ?? defaultModelCapabilities(model),
     }));
   });
 }
@@ -420,15 +434,4 @@ function friendlyError(error: unknown) {
   }
   return message;
 }
-
-function inferModelCapabilities(model: string): ModelCapability[] {
-  const lower = model.toLowerCase();
-  const caps: ModelCapability[] = ["text"];
-  if (/vision|vl|image|visual|gpt-4o|gemini|qwen-vl|qvq|llava|pixtral|claude-3|claude-4|doubao.*vision/.test(lower)) caps.push("vision");
-  if (/tool|function|gpt-4o|gpt-5|claude|gemini|qwen|max|deepseek/.test(lower)) caps.push("tools");
-  if (/web|search|online|sonar|perplexity|联网/.test(lower)) caps.push("web");
-  if (/reason|thinking|r1|o1|o3|o4|qvq|qwq|deepseek-reasoner/.test(lower)) caps.push("reasoning");
-  return Array.from(new Set(caps));
-}
-
 

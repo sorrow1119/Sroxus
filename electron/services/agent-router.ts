@@ -145,24 +145,29 @@ export function routeCollaboration(message: string, agents: AIAgent[]): RouteRes
 }
 
 export function detectCollaborationMode(message: string, agents: AIAgent[]): CollaborationDetection {
-  const manual = detectMultiTask(message, agents);
+  // Quoted messages are context, not new @mentions or delegation instructions.
+  const lines = message.split(/\r?\n/);
+  const instructions = lines.filter((line) => !/^\s*>/.test(line)).join("\n");
+  const quotedContext = lines.filter((line) => /^\s*>/.test(line)).join("\n");
+  const withContext = (task: string) => [task, quotedContext].filter(Boolean).join("\n\n");
+  const manual = detectMultiTask(instructions, agents);
   if (manual) {
-    return manual;
+    return { ...manual, tasks: manual.tasks.map((task) => ({ ...task, task: withContext(task.task) })) };
   }
 
-  const mentions = extractMentions(message);
+  const mentions = extractMentions(instructions);
   if (mentions.length) {
     const targetAgent = mentions.map((name) => findAgentByName(name, agents)).find((agent): agent is AIAgent => Boolean(agent));
     if (targetAgent) {
       return {
         mode: "mention",
         targetAgent,
-        task: removeMentionTokens(message, [targetAgent]).trim() || message,
+        task: withContext(removeMentionTokens(instructions, [targetAgent]).trim()) || message,
       };
     }
   }
 
-  if (detectCoordinatorNeed(message)) {
+  if (detectCoordinatorNeed(instructions)) {
     const primaryAgent = agents.find((agent) => agent.enabled === 1 && agent.isPrimary === 1) ?? agents.find((agent) => agent.enabled === 1);
     if (primaryAgent) {
       return { mode: "coordinator", primaryAgent, task: message };

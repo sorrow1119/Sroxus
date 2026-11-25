@@ -9,10 +9,12 @@ export function registerDataIpc() {
   ipcMain.handle("data:set-storage-path", (_event, newPath: string) => migrateStoragePath(newPath));
   ipcMain.handle("data:get-stats", () => getDataStats());
   ipcMain.handle("data:export-json", (_event, filePath: string) => {
+    assertJsonPath(filePath, "导出");
     exportAllDataToFile(filePath);
     return { ok: true as const, filePath };
   });
   ipcMain.handle("data:import-json", (_event, filePath: string) => {
+    assertJsonPath(filePath, "导入");
     importAllDataFromFile(filePath);
     return { ok: true as const, filePath };
   });
@@ -90,4 +92,16 @@ export function registerDataIpc() {
     fs.writeFileSync(filePath, buffer);
     return filePath;
   });
+}
+
+function assertJsonPath(filePath: unknown, action: string) {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    throw new Error(`${action}文件路径无效。`);
+  }
+  if (!path.isAbsolute(filePath)) {
+    throw new Error(`${action}文件路径必须是绝对路径。`);
+  }
+  if (path.extname(filePath).toLowerCase() !== ".json") {
+    throw new Error(`${action}文件必须是 .json 文件。`);
+  }
 }

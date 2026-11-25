@@ -1,5 +1,6 @@
 ﻿import { randomUUID } from "node:crypto";
 import { safeStorage } from "electron";
+import { defaultModelCapabilities, normalizeModelCapabilities } from "../../shared/model-capabilities";
 import type { ModelCapabilitiesMap, Provider, ProviderInput } from "../../shared/types";
 import { getDb } from "./index";
 
@@ -55,7 +56,7 @@ function stringifyEnabledModels(models: string[] | undefined, fallbackModel: str
 
 
 function parseModelCapabilities(value: string | undefined, models: string[]): ModelCapabilitiesMap {
-  const fallback = Object.fromEntries(models.map((model) => [model, inferModelCapabilities(model)]));
+  const fallback = Object.fromEntries(models.map((model) => [model, defaultModelCapabilities(model)]));
   try {
     const parsed = JSON.parse(value || "{}");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -66,7 +67,7 @@ function parseModelCapabilities(value: string | undefined, models: string[]): Mo
       if (!models.includes(model)) {
         continue;
       }
-      out[model] = normalizeCapabilities(Array.isArray(capabilities) ? capabilities.map(String) : []);
+      out[model] = normalizeModelCapabilities(Array.isArray(capabilities) ? capabilities.map(String) : []);
     }
     return out;
   } catch {
@@ -77,25 +78,9 @@ function parseModelCapabilities(value: string | undefined, models: string[]): Mo
 function stringifyModelCapabilities(value: ModelCapabilitiesMap | undefined, models: string[]): string {
   const out: ModelCapabilitiesMap = {};
   for (const model of models) {
-    out[model] = normalizeCapabilities(value?.[model] ?? inferModelCapabilities(model));
+    out[model] = normalizeModelCapabilities(value?.[model] ?? defaultModelCapabilities(model));
   }
   return JSON.stringify(out);
-}
-
-function normalizeCapabilities(values: string[]) {
-  const allowed = new Set(["text", "vision", "tools", "web", "reasoning"]);
-  const next = Array.from(new Set(["text", ...values.filter((item) => allowed.has(item))]));
-  return next as ModelCapabilitiesMap[string];
-}
-
-function inferModelCapabilities(model: string) {
-  const lower = model.toLowerCase();
-  const caps = ["text"];
-  if (/vision|vl|image|visual|gpt-4o|gemini|qwen-vl|qvq|llava|pixtral|claude-3|claude-4|doubao.*vision/.test(lower)) caps.push("vision");
-  if (/tool|function|gpt-4o|gpt-5|claude|gemini|qwen|max|deepseek/.test(lower)) caps.push("tools");
-  if (/web|search|online|sonar|perplexity|联网/.test(lower)) caps.push("web");
-  if (/reason|thinking|r1|o1|o3|o4|qvq|qwq|deepseek-reasoner/.test(lower)) caps.push("reasoning");
-  return normalizeCapabilities(caps);
 }
 
 function uniqueModels(models: string[]) {
@@ -231,4 +216,9 @@ export function setDefaultProvider(id: string): Provider {
   tx();
   return getProvider(id);
 }
+
+
+
+
+
 

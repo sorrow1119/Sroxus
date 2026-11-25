@@ -2,7 +2,7 @@ export const APP_NAME = "Sroxus";
 export const DEFAULT_DATA_DIR_NAME = "Sroxus";
 
 export const DEFAULT_RECENT_MESSAGES = 10;
-export const DEFAULT_COMPRESS_KEEP = 6;
+export const DEFAULT_COMPRESS_KEEP = 12;
 export const DEFAULT_COMPRESS_THRESHOLD = 12000;
 
 export const PROVIDER_PRESETS = [
@@ -38,6 +38,34 @@ export const PROVIDER_PRESETS = [
     name: "兔子",
     baseUrl: "https://api.tu-zi.com",
     signupUrl: "https://api.tu-zi.com/register?aff=tTqN",
+    kind: "recommended",
+    tags: ["recommended", "gateway"],
+  },
+  {
+    name: "HiveGPT",
+    baseUrl: "",
+    signupUrl: "https://hivegpt.cn/register?aff=L6X7NVRPJBRN",
+    kind: "recommended",
+    tags: ["recommended", "gateway"],
+  },
+  {
+    name: "Neco Api",
+    baseUrl: "",
+    signupUrl: "https://api.sbbbbbbbbb.xyz/register?aff=tmxn",
+    kind: "recommended",
+    tags: ["recommended", "gateway"],
+  },
+  {
+    name: "A6api.ai",
+    baseUrl: "",
+    signupUrl: "https://a6api.ai/?auth=register&aff=zD73",
+    kind: "recommended",
+    tags: ["recommended", "gateway"],
+  },
+  {
+    name: "APInex",
+    baseUrl: "",
+    signupUrl: "https://apinex.bond/?ref=TSQ754H5",
     kind: "recommended",
     tags: ["recommended", "gateway"],
   },

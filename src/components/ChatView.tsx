@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AIAgent, Conversation, Message, RegenerateMode } from "../../shared/types";
 import type { ModelChoice } from "../hooks/useChatStore";
 import { useI18n } from "../i18n";
@@ -5,7 +6,7 @@ import AgentPanel from "./AgentPanel";
 import ChatSearch from "./ChatSearch";
 import CompressionNotice from "./CompressionNotice";
 import MessageComposer from "./MessageComposer";
-import MessageList from "./MessageList";
+import MessageList, { type MessageQuote, type SearchMatchSpec } from "./MessageList";
 import ModelSelector from "./ModelSelector";
 
 interface ChatViewProps {
@@ -70,6 +71,43 @@ export default function ChatView({
   onOpenSystemPrompt,
 }: ChatViewProps) {
   const { t } = useI18n();
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchScope, setSearchScope] = useState<"current" | "all">("current");
+  const [searchActiveIndex, setSearchActiveIndex] = useState(0);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const quoteSequence = useRef(0);
+  const [quoteRequest, setQuoteRequest] = useState<{ quote: MessageQuote; conversationId: string; id: number } | null>(null);
+  const handleQuote = useCallback((quote: MessageQuote) => {
+    if (conversation) setQuoteRequest({ quote, conversationId: conversation.id, id: ++quoteSequence.current });
+  }, [conversation?.id]);
+  const quoteHandled = useCallback((id: number) => setQuoteRequest((current) => current?.id === id ? null : current), []);
+  const searchMatches = useMemo(() => buildSearchMatches(messages, searchQuery), [messages, searchQuery]);
+  const searchMatchCount = searchMatches.reduce((sum, item) => sum + item.count, 0);
+  const matchPosition = searchMatches.length && searchQuery.trim() ? { index: searchActiveIndex + 1, count: searchMatchCount } : null;
+
+  useEffect(() => {
+    setSearchQuery("");
+    setSearchScope("current");
+    setSearchActiveIndex(0);
+    setQuoteRequest(null);
+  }, [conversation?.id]);
+
+  function handleQueryChange(query: string) {
+    setSearchQuery(query);
+    setSearchActiveIndex(0);
+  }
+
+  function handleScopeChange(scope: "current" | "all") {
+    setSearchScope(scope);
+    setSearchActiveIndex(0);
+  }
+
+  function handleNavigateMatch(direction: 1 | -1) {
+    if (!searchMatchCount) {
+      return;
+    }
+    setSearchActiveIndex((current) => (current + direction + searchMatchCount) % searchMatchCount);
+  }
 
   return (
     <main className="flex min-w-0 flex-1 flex-col bg-[#0f1117]">
@@ -81,7 +119,16 @@ export default function ChatView({
           </div>
         </div>
         <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
-          <ChatSearch conversationId={conversation?.id ?? null} onSelectResult={onSelectSearchResult} />
+          <ChatSearch
+            conversationId={conversation?.id ?? null}
+            query={searchQuery}
+            scope={searchScope}
+            matchPosition={matchPosition}
+            onQueryChange={handleQueryChange}
+            onScopeChange={handleScopeChange}
+            onNavigateMatch={handleNavigateMatch}
+            onSelectResult={onSelectSearchResult}
+          />
           <ModelSelector choices={modelChoices} selected={selectedModel} disabled={generating || !modelChoices.length} onSelect={onSelectModel} />
           <button
             onClick={() => void onCompress()}
@@ -120,21 +167,32 @@ export default function ChatView({
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={scrollContainerRef} data-chat-scroll className="min-h-0 flex-1 overflow-y-auto">
         <MessageList
+          key={conversation?.id || "empty"}
           messages={messages}
           hasConversation={Boolean(conversation)}
           generating={generating}
           targetMessageId={targetMessageId}
           onTargetMessageHandled={onTargetMessageHandled}
+          searchQuery={searchQuery}
+          searchMatches={searchMatches}
+          searchActiveIndex={searchActiveIndex}
           onRegenerate={onRegenerate}
+          scrollContainerRef={scrollContainerRef}
+          onQuote={handleQuote}
         />
       </div>
 
       <AgentPanel agents={agents} selectedAgentId={selectedAgentId} onSelect={onSelectAgent} onManage={onManageAgents} />
       <MessageComposer
+        key={conversation?.id || "empty"}
+        conversationId={conversation?.id}
+        quoteRequest={quoteRequest}
+        onQuoteHandled={quoteHandled}
         agents={agents}
-        disabled={!conversation || !selectedModel}
+        disabled={!conversation}
+        sendDisabled={!selectedModel}
         generating={generating}
         focusSignal={focusSignal}
         mentionPrefix={mentionPrefix}
@@ -144,4 +202,32 @@ export default function ChatView({
       />
     </main>
   );
+}
+
+function buildSearchMatches(messages: Message[], query: string): SearchMatchSpec[] {
+  const text = query.trim().toLowerCase();
+  if (!text) {
+    return [];
+  }
+  const matches: SearchMatchSpec[] = [];
+  let globalStart = 0;
+  for (const message of messages) {
+    const content = message.content ?? "";
+    const lower = content.toLowerCase();
+    let cursor = 0;
+    let count = 0;
+    while (cursor < lower.length) {
+      const found = lower.indexOf(text, cursor);
+      if (found < 0) {
+        break;
+      }
+      count += 1;
+      cursor = found + text.length;
+    }
+    if (count) {
+      matches.push({ messageId: message.id, globalStart, count });
+      globalStart += count;
+    }
+  }
+  return matches;
 }

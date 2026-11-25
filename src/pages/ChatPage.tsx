@@ -9,6 +9,7 @@ import type { AIAgent } from "../../shared/types";
 import { useChatStore } from "../hooks/useChatStore";
 import SettingsPage from "./SettingsPage";
 import ImagePage from "./ImagePage";
+import VideoPage from "./VideoPage";
 
 export default function ChatPage() {
   const chat = useChatStore();
@@ -16,6 +17,8 @@ export default function ChatPage() {
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showImages, setShowImages] = useState(false);
+  const [showVideos, setShowVideos] = useState(false);
+  const [videoFrame, setVideoFrame] = useState<string | undefined>();
   const [showAgentManager, setShowAgentManager] = useState(false);
   const [showPluginManager, setShowPluginManager] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(260);
@@ -29,6 +32,14 @@ export default function ChatPage() {
   async function createAndFocusConversation() {
     await chat.createConversation();
     setComposerFocusSignal((value) => value + 1);
+  }
+
+  function handleSelectModel(choice: import("../hooks/useChatStore").ModelChoice | null) {
+    chat.setSelectedModel(choice);
+    // 选完模型后输入框从「禁用」变为可用，需主动聚焦，否则用户点不进去。
+    if (choice) {
+      setComposerFocusSignal((value) => value + 1);
+    }
   }
 
   async function refreshAgents() {
@@ -83,8 +94,11 @@ export default function ChatPage() {
     );
   }
 
+  if (showVideos) {
+    return <VideoPage initialFrame={videoFrame} onBack={() => { setShowVideos(false); setVideoFrame(undefined); }} />;
+  }
   if (showImages) {
-    return <ImagePage onBack={() => setShowImages(false)} />;
+    return <ImagePage onBack={() => setShowImages(false)} onCreateVideo={(file) => { setVideoFrame(file); setShowVideos(true); }} />;
   }
 
   return (
@@ -100,6 +114,7 @@ export default function ChatPage() {
         onDelete={(id) => void chat.deleteConversation(id)}
         onToggleCollapse={() => setSidebarCollapsed((value) => !value)}
         onOpenImages={() => setShowImages(true)}
+        onOpenVideos={() => { setVideoFrame(undefined); setShowVideos(true); }}
         onOpenPlugins={() => setShowPluginManager(true)}
         onOpenSettings={() => setShowSettings(true)}
       />
@@ -136,7 +151,7 @@ export default function ChatPage() {
         selectedAgentId={selectedAgent?.id ?? null}
         mentionPrefix={selectedAgent ? `@${selectedAgent.name} ` : ""}
         mentionSignal={mentionSignal}
-        onSelectModel={chat.setSelectedModel}
+        onSelectModel={handleSelectModel}
         onSelectAgent={selectAgent}
         onManageAgents={() => setShowAgentManager(true)}
         targetMessageId={targetMessageId}

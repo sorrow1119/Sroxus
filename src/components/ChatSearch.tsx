@@ -3,14 +3,16 @@ import type { MessageSearchResult } from "../../shared/types";
 
 interface ChatSearchProps {
   conversationId: string | null;
+  query: string;
+  scope: "current" | "all";
+  matchPosition: { index: number; count: number } | null;
+  onQueryChange: (query: string) => void;
+  onScopeChange: (scope: "current" | "all") => void;
+  onNavigateMatch: (direction: 1 | -1) => void;
   onSelectResult: (conversationId: string, messageId: string) => void;
 }
 
-type Scope = "current" | "all";
-
-export default function ChatSearch({ conversationId, onSelectResult }: ChatSearchProps) {
-  const [query, setQuery] = useState("");
-  const [scope, setScope] = useState<Scope>("current");
+export default function ChatSearch({ conversationId, query, scope, matchPosition, onQueryChange, onScopeChange, onNavigateMatch, onSelectResult }: ChatSearchProps) {
   const [results, setResults] = useState<MessageSearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
@@ -54,7 +56,7 @@ export default function ChatSearch({ conversationId, onSelectResult }: ChatSearc
     <div ref={boxRef} className="relative flex min-w-[280px] max-w-[440px] flex-1 items-center gap-2">
       <select
         value={scope}
-        onChange={(event) => setScope(event.target.value as Scope)}
+        onChange={(event) => onScopeChange(event.target.value as "current" | "all")}
         className="rounded-md border border-[#343b49] bg-[#0f1117] px-2 py-1.5 text-xs text-slate-300 outline-none focus:border-[#3b82f6]"
       >
         <option value="current">当前</option>
@@ -63,14 +65,41 @@ export default function ChatSearch({ conversationId, onSelectResult }: ChatSearc
       <input
         value={query}
         onFocus={() => setOpen(Boolean(query.trim()))}
-        onChange={(event) => setQuery(event.target.value)}
+        onChange={(event) => onQueryChange(event.target.value)}
         placeholder={placeholder}
         className="min-w-0 flex-1 rounded-md border border-[#343b49] bg-[#0f1117] px-3 py-1.5 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-[#3b82f6]"
       />
+      {matchPosition && (
+        <span className="shrink-0 rounded-md border border-[#343b49] bg-[#0f1117] px-2 py-1 text-xs text-slate-300">
+          {matchPosition.index}/{matchPosition.count}
+        </span>
+      )}
+      {matchPosition && (
+        <div className="flex shrink-0 gap-1">
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => onNavigateMatch(-1)}
+            className="rounded border border-[#343b49] px-2 py-1 text-xs text-slate-300 hover:bg-[#242936]"
+            title="上一个"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => onNavigateMatch(1)}
+            className="rounded border border-[#343b49] px-2 py-1 text-xs text-slate-300 hover:bg-[#242936]"
+            title="下一个"
+          >
+            ↓
+          </button>
+        </div>
+      )}
       {query && (
         <button
           onClick={() => {
-            setQuery("");
+            onQueryChange("");
             setResults([]);
           }}
           className="rounded px-1.5 py-1 text-xs text-slate-500 hover:bg-[#242936] hover:text-slate-200"

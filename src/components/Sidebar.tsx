@@ -14,6 +14,7 @@ interface SidebarProps {
   onDelete: (id: string) => void;
   onToggleCollapse: () => void;
   onOpenImages: () => void;
+  onOpenVideos: () => void;
   onOpenPlugins: () => void;
   onOpenSettings: () => void;
 }
@@ -29,6 +30,7 @@ export default function Sidebar({
   onDelete,
   onToggleCollapse,
   onOpenImages,
+  onOpenVideos,
   onOpenPlugins,
   onOpenSettings,
 }: SidebarProps) {
@@ -155,6 +157,9 @@ export default function Sidebar({
         </label>
         <button onClick={onOpenImages} className="w-full rounded-md px-3 py-2 text-left text-sm text-slate-300 hover:bg-[#242936]">
           AI 生图
+        </button>
+        <button onClick={onOpenVideos} className="w-full rounded-md px-3 py-2 text-left text-sm text-slate-300 hover:bg-[#242936]">
+          AI 生视频
         </button>
         <button onClick={onOpenPlugins} className="w-full rounded-md px-3 py-2 text-left text-sm text-slate-300 hover:bg-[#242936]">
           {t("common.plugins")}

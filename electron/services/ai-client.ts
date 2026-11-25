@@ -1,17 +1,29 @@
 ﻿import fs from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import type { EndpointPathMode, ProviderInput } from "../../shared/types";
+import { defaultModelCapabilities } from "../../shared/model-capabilities";
+import type { EndpointPathMode, ModelCapabilitiesMap, ProviderInput } from "../../shared/types";
 import { sanitizeForLog, sanitizeMessagesForAI } from "./privacy-filter";
 import { getStoragePath } from "./storage-path";
+import {
+  formatWebSearchResults,
+  getWebSearchSettings,
+  isWebSearchConfigured,
+  parseWebSearchQuery,
+  searchWebResults,
+  webSearchToolDefinitions,
+  type WebSearchToolCall,
+} from "./web-search";
 
 export type ChatContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } };
 
 export type ChatMessage = {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string | ChatContentPart[];
+  tool_calls?: WebSearchToolCall[];
+  tool_call_id?: string;
 };
 
 type ChatOptions = {
@@ -19,11 +31,17 @@ type ChatOptions = {
   onDelta: (text: string) => void;
   maxTokens?: number;
   stream?: boolean;
+  disableWebSearch?: boolean;
 };
 
 type ProbeResult =
   | { ok: true; endpoint: string; fullText: string }
   | { ok: false; endpoint: string; retryable: boolean; message: string };
+
+type SearchProbeResult =
+  | { status: "ok"; endpoint: string; fullText: string }
+  | { status: "tool_calls"; endpoint: string; fullText: string; toolCalls: WebSearchToolCall[] }
+  | { status: "error"; endpoint: string; retryable: boolean; unsupportedTools: boolean; message: string };
 
 export class OpenAICompatibleClient {
   constructor(private readonly config: ProviderInput) {}
@@ -45,13 +63,13 @@ export class OpenAICompatibleClient {
     }
   }
 
-  async listModels() {
+  async listModels(fetcher: typeof fetch = fetch): Promise<{ ok: boolean; models: string[]; modelCapabilities?: ModelCapabilitiesMap; message: string }> {
     const roots = this.baseUrls();
     let lastError = "Provider 不支持获取模型。";
     for (const baseUrl of roots) {
       for (const endpoint of this.modelCandidates(baseUrl)) {
         try {
-          const response = await fetch(endpoint, {
+          const response = await fetcher(endpoint, {
             method: "GET",
             headers: this.headers(),
             signal: AbortSignal.timeout(20000),
@@ -64,9 +82,9 @@ export class OpenAICompatibleClient {
             }
             return { ok: false, models: [], message: explainHttpError(response.status, text) };
           }
-          const models = parseModelsList(text);
-          if (models.length) {
-            return { ok: true, models, message: `已从 ${endpoint} 获取模型。` };
+          const parsed = parseModelsList(text);
+          if (parsed.models.length) {
+            return { ok: true, models: parsed.models, modelCapabilities: parsed.modelCapabilities, message: `已从 ${endpoint} 获取模型。` };
           }
           lastError = `接口可达，但未解析到模型列表：${endpoint}`;
         } catch (error) {
@@ -91,7 +109,7 @@ export class OpenAICompatibleClient {
             const text = await response.text();
             const latencyMs = Math.round(performance.now() - started);
             if (response.ok) {
-              const models = parseModelsList(text);
+              const models = parseModelsList(text).models;
               if (models.length || looksLikeModelsPayload(text)) {
                 return { url: baseUrl, ok: true, latencyMs, message: `可用: ${endpoint}` };
               }
@@ -127,9 +145,31 @@ export class OpenAICompatibleClient {
     });
 
     let lastError = "AI 接口地址或 endpoint 不正确。";
+    const builtinWebSearch = !options.disableWebSearch && this.hasBuiltinWebSearch();
+    if (!options.disableWebSearch && isWebSearchConfigured() && !builtinWebSearch) {
+      const searchResult = await this.chatWithWebSearch(outboundMessages, options);
+      if (searchResult.ok) {
+        logAiEvent("chat:success", { endpoint: searchResult.endpoint, model: this.config.model, outputChars: searchResult.fullText.length, webSearch: true });
+        return searchResult.fullText;
+      }
+      lastError = searchResult.message;
+      // tool-calls 路径失败（网关不支持 function calling / 模型反复要搜不收尾等），
+      // 自动降级为"直接搜索"：应用自己定搜索词并调用搜索 API，把结果注入上下文后
+      // 用普通聊天请求发送，完全绕开工具调用，不依赖网关的 function calling 能力。
+      const directFallback = await this.chatWithDirectSearch(outboundMessages, options);
+      if (directFallback.ok) {
+        logAiEvent("chat:success", { endpoint: directFallback.endpoint, model: this.config.model, outputChars: directFallback.fullText.length, webSearch: true, mode: "direct" });
+        return directFallback.fullText;
+      }
+      logAiEvent("chat:failed", { model: this.config.model, message: `直接搜索降级也失败：${directFallback.message}`, webSearch: true, mode: "direct" });
+      if (!searchResult.unsupportedTools) {
+        logAiEvent("chat:failed", { model: this.config.model, message: searchResult.message, webSearch: true });
+        throw new Error(searchResult.message);
+      }
+    }
     for (const baseUrl of this.baseUrls()) {
       for (const endpoint of this.chatCandidates(baseUrl)) {
-        const result = await this.tryChatEndpoint(endpoint, outboundMessages, options);
+        const result = await this.tryChatEndpoint(endpoint, outboundMessages, options, builtinWebSearch);
         if (result.ok) {
           logAiEvent("chat:success", { endpoint, model: this.config.model, outputChars: result.fullText.length });
           return result.fullText;
@@ -145,7 +185,123 @@ export class OpenAICompatibleClient {
     throw new Error(lastError);
   }
 
-  private async tryChatEndpoint(endpoint: string, messages: ChatMessage[], options: ChatOptions): Promise<ProbeResult> {
+  private hasBuiltinWebSearch() {
+    const mode = getWebSearchSettings().mode;
+    if (mode === "search_api") {
+      return false;
+    }
+    // 「模型自带联网」只有在 responses 端点（能注入 web_search_preview 工具）
+    // 或模型名本身是原生联网模型（sonar/perplexity 等）时才真正成立。
+    // chat_completions 网关下即使手动勾了 "web" 能力也无法注入联网工具，
+    // 此时应退回第三方搜索 API 流程，而不是把 "web" 标记误判为已联网。
+    if (modelLooksBuiltinWeb(this.config.model)) {
+      return true;
+    }
+    if (this.config.endpointType !== "responses") {
+      return false;
+    }
+    const capabilities = this.config.modelCapabilities?.[this.config.model] ?? [];
+    return capabilities.includes("web");
+  }
+
+  private async chatWithWebSearch(messages: ChatMessage[], options: ChatOptions): Promise<{
+    ok: boolean;
+    endpoint: string;
+    fullText: string;
+    message: string;
+    unsupportedTools: boolean;
+  }> {
+    let lastError = "联网搜索请求失败。";
+    for (const baseUrl of this.baseUrls()) {
+      for (const endpoint of this.chatCandidates(baseUrl)) {
+        const result = await this.tryChatEndpointWithWebSearch(endpoint, messages, options);
+        if (result.status === "ok") {
+          options.onDelta(result.fullText);
+          return { ok: true, endpoint, fullText: result.fullText, message: "", unsupportedTools: false };
+        }
+        if (result.status === "tool_calls") {
+          try {
+            const fullText = await this.runWebSearchLoop(endpoint, messages, result.toolCalls, options);
+            return { ok: true, endpoint, fullText, message: "", unsupportedTools: false };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (/工具不存在|不支持/.test(message)) {
+              return { ok: false, endpoint, fullText: "", message, unsupportedTools: true };
+            }
+            return { ok: false, endpoint, fullText: "", message, unsupportedTools: false };
+          }
+        }
+        if (result.unsupportedTools) {
+          return { ok: false, endpoint, fullText: "", message: result.message, unsupportedTools: true };
+        }
+        lastError = result.message;
+        if (!result.retryable) {
+          return { ok: false, endpoint, fullText: "", message: result.message, unsupportedTools: false };
+        }
+      }
+    }
+    return { ok: false, endpoint: "", fullText: "", message: lastError, unsupportedTools: false };
+  }
+
+  // 直接搜索降级路线：不依赖网关的 function calling。
+  // 流程：取用户最新消息作为搜索词 → 调用搜索 API → 把搜索结果作为"参考资料"
+  // 注入上下文 → 走普通聊天请求（流式，与正常对话完全一致）。
+  private async chatWithDirectSearch(messages: ChatMessage[], options: ChatOptions): Promise<{
+    ok: boolean;
+    endpoint: string;
+    fullText: string;
+    message: string;
+  }> {
+    const settings = getWebSearchSettings();
+    let query = "";
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === "user") {
+        query = chatContentText(messages[index].content).trim();
+        break;
+      }
+    }
+    if (!query) {
+      return { ok: false, endpoint: "", fullText: "", message: "没有可用的搜索关键词。" };
+    }
+    // 搜索词太长时截断，避免把整段对话塞给搜索引擎。
+    if (query.length > 200) {
+      query = query.slice(0, 200);
+    }
+
+    let searchBlock: string;
+    try {
+      const results = await searchWebResults(query, { signal: options.signal, maxResults: settings.maxResults });
+      searchBlock = formatWebSearchResults(results);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, endpoint: "", fullText: "", message: `搜索请求失败：${message}` };
+    }
+
+    const augmented: ChatMessage[] = [
+      ...messages,
+      {
+        role: "system",
+        content: `以下是对搜索词「${query}」的网络搜索结果（可能已过时或不完整，请结合常识判断，引用时注明来源）：\n\n${searchBlock}\n\n请优先依据以上搜索结果回答用户最新的问题。`,
+      },
+    ];
+
+    let lastError = "联网搜索（直接模式）请求失败。";
+    for (const baseUrl of this.baseUrls()) {
+      for (const endpoint of this.chatCandidates(baseUrl)) {
+        const result = await this.tryChatEndpoint(endpoint, augmented, options, false);
+        if (result.ok) {
+          return { ok: true, endpoint, fullText: result.fullText, message: "" };
+        }
+        lastError = result.message;
+        if (!result.retryable) {
+          return { ok: false, endpoint, fullText: "", message: result.message };
+        }
+      }
+    }
+    return { ok: false, endpoint: "", fullText: "", message: lastError };
+  }
+
+  private async tryChatEndpointWithWebSearch(endpoint: string, messages: ChatMessage[], options: ChatOptions): Promise<SearchProbeResult> {
     let response: Response;
     try {
       response = await fetch(endpoint, {
@@ -156,8 +312,153 @@ export class OpenAICompatibleClient {
           messages,
           temperature: this.config.temperature ?? 0.7,
           max_tokens: options.maxTokens ?? this.config.maxTokens ?? 4096,
-          stream: options.stream ?? this.config.stream ?? true,
+          stream: false,
+          tools: webSearchToolDefinitions(),
+          tool_choice: "auto",
         }),
+        signal: options.signal,
+      });
+    } catch (error) {
+      const message = explainFetchError(error);
+      return { status: "error", endpoint, retryable: !message.includes("请求超时"), unsupportedTools: false, message };
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!response.ok) {
+      const rawText = await response.text().catch(() => "");
+      const unsupportedTools = looksLikeUnsupportedTools(response.status, rawText, contentType);
+      const logPath = saveAiRawResponse("web-search-http-error", endpoint, rawText);
+      return {
+        status: "error",
+        endpoint,
+        retryable: shouldRetry(response.status, rawText, contentType),
+        unsupportedTools,
+        message: `${explainHttpError(response.status, rawText)}\n日志: ${logPath}`,
+      };
+    }
+
+    const rawText = await response.text().catch(() => "");
+    const search = parseSearchCompletion(rawText);
+    if (search.toolCalls.length) {
+      return { status: "tool_calls", endpoint, fullText: search.content, toolCalls: search.toolCalls };
+    }
+    const parsed = parseCompletionText(rawText);
+    if (parsed) {
+      return { status: "ok", endpoint, fullText: parsed };
+    }
+    const logPath = saveAiRawResponse("web-search-parse-failed", endpoint, rawText);
+    return {
+      status: "error",
+      endpoint,
+      retryable: true,
+      unsupportedTools: false,
+      message: `联网搜索响应格式不符合预期。\n日志: ${logPath}`,
+    };
+  }
+
+  private async runWebSearchLoop(endpoint: string, messages: ChatMessage[], firstToolCalls: WebSearchToolCall[], options: ChatOptions): Promise<string> {
+    const working = [...messages];
+    let toolCalls = firstToolCalls;
+    let lastAnswer = "";
+    let previousToolCallsSignature = "";
+    let consecutiveToolOnlyRounds = 0;
+    for (let round = 0; round < 4; round += 1) {
+      const assistantContent = "";
+      working.push({
+        role: "assistant",
+        content: assistantContent,
+        tool_calls: toolCalls,
+      });
+      for (const toolCall of toolCalls) {
+        let content: string;
+        if (toolCall.function.name === "web_search") {
+          try {
+            const { query, maxResults } = parseWebSearchQuery(toolCall);
+            if (!query) {
+              content = "搜索关键词为空。";
+            } else {
+              const results = await searchWebResults(query, { signal: options.signal, maxResults });
+              content = formatWebSearchResults(results);
+            }
+          } catch (error) {
+            content = `搜索失败：${error instanceof Error ? error.message : String(error)}`;
+          }
+        } else {
+          content = `工具不存在：${toolCall.function.name}`;
+        }
+        working.push({ role: "tool", tool_call_id: toolCall.id, content });
+      }
+
+      const result = await this.tryChatEndpointWithWebSearch(endpoint, working, options);
+      if (result.status === "ok") {
+        options.onDelta(result.fullText);
+        return result.fullText;
+      }
+      if (result.status === "tool_calls") {
+        // 模型既给了文字答案又继续请求工具：优先把已产出的答案落地，
+        // 避免网关模型反复要搜、永不收尾导致循环耗尽。
+        const hasText = Boolean(result.fullText && result.fullText.trim());
+        if (hasText) {
+          lastAnswer = result.fullText;
+          consecutiveToolOnlyRounds = 0;
+        } else {
+          consecutiveToolOnlyRounds += 1;
+        }
+        // 连续两轮请求完全相同的工具（相同 query）说明网关模型陷入死循环。
+        const nextSignature = result.toolCalls
+          .map((call) => `${call.function.name}:${call.function.arguments}`)
+          .sort()
+          .join("|");
+        if (previousToolCallsSignature && nextSignature === previousToolCallsSignature) {
+          if (lastAnswer.trim()) {
+            options.onDelta(lastAnswer);
+            return lastAnswer;
+          }
+          throw new Error("联网搜索陷入重复搜索，已停止。请换一个模型或简化问题后重试。");
+        }
+        previousToolCallsSignature = nextSignature;
+        // 连续两轮只返回工具调用、从不给出文字答案：说明该网关模型未正确支持
+        // 函数调用（把 tools 参数忽略/幻觉出 tool_calls），及时终止避免空转。
+        if (consecutiveToolOnlyRounds >= 2) {
+          if (lastAnswer.trim()) {
+            options.onDelta(lastAnswer);
+            return lastAnswer;
+          }
+          throw new Error("当前模型未正确支持联网工具调用，已停止。请换一个支持 function calling 的模型，或在设置中改用第三方搜索。");
+        }
+        toolCalls = result.toolCalls;
+        continue;
+      }
+      if (result.unsupportedTools) {
+        throw new Error(result.message);
+      }
+      throw new Error(result.message);
+    }
+    // 循环耗尽：若中途已累积到模型给出的文字答案则兜底返回，否则才报错。
+    if (lastAnswer.trim()) {
+      options.onDelta(lastAnswer);
+      return lastAnswer;
+    }
+    throw new Error("联网搜索工具循环超过最大轮数，请稍后重试。");
+  }
+
+  private async tryChatEndpoint(endpoint: string, messages: ChatMessage[], options: ChatOptions, nativeWebSearch = false): Promise<ProbeResult> {
+    let response: Response;
+    try {
+      const requestBody: Record<string, unknown> = {
+        model: this.config.model,
+        messages,
+        temperature: this.config.temperature ?? 0.7,
+        max_tokens: options.maxTokens ?? this.config.maxTokens ?? 4096,
+        stream: options.stream ?? this.config.stream ?? true,
+      };
+      if (nativeWebSearch && this.config.endpointType === "responses") {
+        requestBody.tools = [{ type: "web_search_preview" }];
+      }
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(requestBody),
         signal: options.signal,
       });
     } catch (error) {
@@ -175,6 +476,9 @@ export class OpenAICompatibleClient {
     if (!response.ok) {
       const rawText = await response.text().catch(() => "");
       const logPath = saveAiRawResponse("http-error", endpoint, rawText);
+      if (nativeWebSearch && looksLikeUnsupportedTools(response.status, rawText, contentType)) {
+        return this.tryChatEndpoint(endpoint, messages, options, false);
+      }
       return {
         ok: false,
         endpoint,
@@ -435,20 +739,74 @@ function parseCompletionText(text: string) {
   }
 }
 
-function parseModelsList(text: string) {
+function parseSearchCompletion(text: string): { content: string; toolCalls: WebSearchToolCall[] } {
   try {
     const data = JSON.parse(text) as {
-      data?: Array<{ id?: string }>;
-      models?: Array<{ id?: string } | string>;
+      choices?: Array<{
+        message?: {
+          content?: string | Array<{ text?: string }>;
+          tool_calls?: Array<WebSearchToolCall & { id?: string; function?: { name?: string; arguments?: string } }>;
+        };
+      }>;
+    };
+    const message = data.choices?.[0]?.message;
+    const content = Array.isArray(message?.content)
+      ? (message?.content ?? []).map((part) => part.text ?? "").join("")
+      : message?.content ?? "";
+    const toolCalls = (message?.tool_calls ?? [])
+      .map((call) => ({
+        id: call.id ?? "",
+        function: {
+          name: call.function?.name ?? "",
+          arguments: call.function?.arguments ?? "{}",
+        },
+      }))
+      .filter((call) => call.id && call.function.name);
+    return { content, toolCalls };
+  } catch {
+    return { content: "", toolCalls: [] };
+  }
+}
+
+function looksLikeUnsupportedTools(status: number, text: string, contentType: string | null) {
+  if (status !== 400 && status !== 422 && status !== 415 && status !== 501) {
+    return false;
+  }
+  const lower = `${contentType ?? ""} ${text}`.toLowerCase();
+  return (
+    lower.includes("tool") ||
+    lower.includes("function") ||
+    lower.includes("unsupported") ||
+    lower.includes("not support") ||
+    lower.includes("does not support") ||
+    lower.includes("no tools")
+  );
+}
+
+function modelLooksBuiltinWeb(model: string) {
+  return /sonar|perplexity|search-preview|search-preview|web-search|web_search|online|gemini.*search|glm.*web|deepseek.*web/i.test(model);
+}
+
+function parseModelsList(text: string): { models: string[]; modelCapabilities: ModelCapabilitiesMap } {
+  try {
+    const data = JSON.parse(text) as {
+      data?: Array<Record<string, unknown> | string>;
+      models?: Array<Record<string, unknown> | string>;
       object?: string;
     };
-    const models = [
-      ...(data.data ?? []).map((item) => item.id).filter(Boolean),
-      ...(data.models ?? []).map((item) => (typeof item === "string" ? item : item.id)).filter(Boolean),
-    ] as string[];
-    return Array.from(new Set(models)).sort();
+    const modelCapabilities: ModelCapabilitiesMap = {};
+    const models = [...(data.data ?? []), ...(data.models ?? [])]
+      .map((item) => {
+        const id = typeof item === "string" ? item : typeof item.id === "string" ? item.id : "";
+        if (id) {
+          modelCapabilities[id] = defaultModelCapabilities(id, typeof item === "string" ? undefined : item);
+        }
+        return id;
+      })
+      .filter(Boolean);
+    return { models: Array.from(new Set(models)).sort(), modelCapabilities };
   } catch {
-    return [];
+    return { models: [], modelCapabilities: {} };
   }
 }
 
@@ -583,4 +941,14 @@ function chatContentTextLength(content: ChatMessage["content"]) {
     return content.length;
   }
   return content.reduce((sum, part) => sum + (part.type === "text" ? part.text.length : 0), 0);
+}
+
+function chatContentText(content: ChatMessage["content"]) {
+  if (typeof content === "string") {
+    return content;
+  }
+  return content
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .filter(Boolean)
+    .join("\n");
 }

@@ -1,5 +1,6 @@
 ﻿import { useEffect, useMemo, useState } from "react";
-import { PROVIDER_PRESETS } from "../../shared/constants";
+import { DEFAULT_COMPRESS_KEEP, PROVIDER_PRESETS } from "../../shared/constants";
+import { ALL_MODEL_CAPABILITIES, DEFAULT_MODEL_CAPABILITIES, defaultModelCapabilities, mergeModelCapabilities, normalizeModelCapabilities } from "../../shared/model-capabilities";
 import type { DataStats, EndpointPathMode, ModelCapability, Provider, ProviderInput } from "../../shared/types";
 import { useI18n, type Language } from "../i18n";
 
@@ -7,8 +8,25 @@ interface SettingsPageProps {
   onBack: () => void;
 }
 
-type SettingsTab = "models" | "context" | "data" | "appearance";
+type SettingsTab = "models" | "context" | "web" | "data" | "appearance";
 type Notice = { type: "success" | "error" | "info"; text: string } | null;
+type WebSearchProvider = "tavily" | "serper" | "brave";
+type WebSearchMode = "auto" | "builtin" | "search_api";
+type WebSearchSettings = {
+  enabled: boolean;
+  mode: WebSearchMode;
+  provider: WebSearchProvider;
+  apiKey: string;
+  maxResults: number;
+};
+
+const DEFAULT_WEB_SEARCH_SETTINGS: WebSearchSettings = {
+  enabled: false,
+  mode: "auto",
+  provider: "tavily",
+  apiKey: "",
+  maxResults: 5,
+};
 
 const EMPTY_FORM: ProviderInput = {
   name: "自定义",
@@ -32,6 +50,7 @@ const TEXT = {
     tabs: {
       models: "模型配置",
       context: "上下文设置",
+      web: "联网搜索",
       data: "数据管理",
       appearance: "外观",
     },
@@ -75,6 +94,10 @@ const TEXT = {
     multiModel: "多模型管理",
     multiModelDesc: "获取模型列表后勾选；聊天页会显示这些模型，也可以手动添加。",
     fetchModels: "获取模型列表",
+    reidentifyCapabilities: "重新自动识别能力",
+    enableCommonCapabilities: "开启常用能力",
+    enableAllCapabilities: "全部勾选",
+    capabilityAutoHint: "优先采用服务商能力信息；信息缺失时默认开启文本、看图、工具、思考，联网仅在有明确标识时开启。刷新保留已设能力。批量按钮只作用于已启用模型，需保存生效；勾选不代表服务端一定支持，可手动修改。",
     fetchingModels: "获取中...",
     manualModelPlaceholder: "手动添加另一个模型名",
     add: "添加",
@@ -100,10 +123,26 @@ const TEXT = {
     modelListUnsupported: "该接口不支持获取模型，请手动输入模型名。",
     contextTitle: "上下文设置",
     autoSave: "修改后自动保存。",
-    recentMessages: "保留最近消息数量",
+    recentMessages: "近期原文保留下限（压缩时）",
     compressKeep: "压缩时保留最近消息数量",
     compressThreshold: "自动压缩提醒阈值",
     compressionNotice: "开启自动压缩提醒",
+    webTitle: "联网搜索",
+    webDesc: "配置后，AI 在需要最新信息时会先搜索实时网页，再把结果作为上下文回答。",
+    webEnabled: "启用联网搜索",
+    webMode: "联网方式",
+    webModeAuto: "自动：优先用模型自带联网",
+    webModeAutoDesc: "模型或模型名带联网能力时直接用模型自带搜索；否则使用下方第三方搜索服务。",
+    webModeBuiltin: "仅用模型自带联网",
+    webModeBuiltinDesc: "不配置第三方搜索 API，适合 Perplexity、Sonar、search-preview 等原生联网模型。",
+    webModeSearchApi: "仅用第三方搜索 API",
+    webModeSearchApiDesc: "强制使用下方 Tavily / Serper / Brave 搜索，再交给模型回答。若你的模型通过普通 OpenAI 兼容网关（chat/completions）接入，请选此项并填入 Key，才能真正联网。",
+    webProvider: "搜索服务商",
+    webProviderHint: "选择 Tavily、Serper 或 Brave，并填入对应 API Key。",
+    webApiKey: "API Key",
+    webGetKey: "获取 API Key",
+    webBuiltinTip: "提示：如果你用的模型本身支持联网（如 Perplexity/Sonar、DeepSeek 联网版、Gemini 搜索等），选择上方「仅用模型自带联网」即可，无需填第三方 Key。",
+    webMaxResults: "最大结果数",
     dataTitle: "数据管理",
     dataDesc: "管理本地数据库路径、导入和导出。",
     refresh: "刷新",
@@ -133,6 +172,7 @@ const TEXT = {
     tabs: {
       models: "Models",
       context: "Context",
+      web: "Web Search",
       data: "Data",
       appearance: "Appearance",
     },
@@ -176,6 +216,10 @@ const TEXT = {
     multiModel: "Model Management",
     multiModelDesc: "Fetch and enable models for the chat page, or add model names manually.",
     fetchModels: "Fetch models",
+    reidentifyCapabilities: "Re-detect capabilities",
+    enableCommonCapabilities: "Enable common capabilities",
+    enableAllCapabilities: "Enable all capabilities",
+    capabilityAutoHint: "Prefer provider metadata; otherwise enable text, vision, tools and reasoning. Web requires an explicit signal. Refresh preserves existing choices. Batch buttons affect enabled models only; save to apply. Checkboxes are permissions, not a guarantee of provider support, and remain editable.",
     fetchingModels: "Fetching...",
     manualModelPlaceholder: "Add another model name manually",
     add: "Add",
@@ -201,10 +245,26 @@ const TEXT = {
     modelListUnsupported: "This endpoint does not support model listing. Enter the model name manually.",
     contextTitle: "Context Settings",
     autoSave: "Changes are saved automatically.",
-    recentMessages: "Recent messages to keep",
+    recentMessages: "Minimum recent messages retained during compression",
     compressKeep: "Recent messages kept during compression",
     compressThreshold: "Auto compression reminder threshold",
     compressionNotice: "Enable compression reminder",
+    webTitle: "Web Search",
+    webDesc: "When enabled, the AI can search live web pages first and use the results before answering.",
+    webEnabled: "Enable web search",
+    webMode: "Search mode",
+    webModeAuto: "Auto: prefer model built-in search",
+    webModeAutoDesc: "Use native search when the model supports it, otherwise use the third-party search API below.",
+    webModeBuiltin: "Model built-in search only",
+    webModeBuiltinDesc: "No third-party search API needed. Good for Perplexity, Sonar, search-preview, and other native search models.",
+    webModeSearchApi: "Third-party search API only",
+    webModeSearchApiDesc: "Always search via Tavily / Serper / Brave below, then let the model answer. If your model is connected through a plain OpenAI-compatible gateway (chat/completions), choose this and fill in a key to get real web access.",
+    webProvider: "Search provider",
+    webProviderHint: "Choose Tavily, Serper, or Brave and enter the matching API key.",
+    webApiKey: "API Key",
+    webGetKey: "Get API Key",
+    webBuiltinTip: "Tip: if your model already supports web search (e.g. Perplexity/Sonar, DeepSeek web, Gemini search), choose \"Model built-in search only\" above — no third-party key needed.",
+    webMaxResults: "Max results",
     dataTitle: "Data Management",
     dataDesc: "Manage local database path, import, and export.",
     refresh: "Refresh",
@@ -242,19 +302,21 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
   const [testing, setTesting] = useState(false);
   const [loadingModels, setLoadingModels] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [detectedModelCapabilities, setDetectedModelCapabilities] = useState<ProviderInput["modelCapabilities"]>({});
   const [manualModel, setManualModel] = useState("");
   const [modelFilter, setModelFilter] = useState("");
   const [message, setMessage] = useState<Notice>(null);
   const [showApiKey, setShowApiKey] = useState(false);
   const [contextSettings, setContextSettings] = useState({
     recentMessages: 10,
-    COMPRESS_KEEP: 6,
+    COMPRESS_KEEP: DEFAULT_COMPRESS_KEEP,
     COMPRESS_THRESHOLD: 12000,
     compressionNoticeEnabled: true,
   });
   const [dataStats, setDataStats] = useState<DataStats | null>(null);
   const [dataMessage, setDataMessage] = useState<Notice>(null);
   const [theme, setTheme] = useState("dark");
+  const [webSearchSettings, setWebSearchSettings] = useState<WebSearchSettings>(DEFAULT_WEB_SEARCH_SETTINGS);
 
   const selectedProvider = useMemo(
     () => providers.find((provider) => provider.id === selectedId) ?? null,
@@ -286,13 +348,20 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
     const settings = await window.electronAPI.settings.getAll();
     setContextSettings({
       recentMessages: clampInt(settings.recentMessages, 10, 1, 50),
-      COMPRESS_KEEP: clampInt(settings.COMPRESS_KEEP, 6, 1, 20),
+      COMPRESS_KEEP: clampInt(settings.COMPRESS_KEEP, DEFAULT_COMPRESS_KEEP, 1, 50),
       COMPRESS_THRESHOLD: clampInt(settings.COMPRESS_THRESHOLD, 12000, 1000, 100000),
       compressionNoticeEnabled: settings.compressionNoticeEnabled !== "false",
     });
     const nextTheme = settings.theme || "dark";
     setTheme(nextTheme);
     applyTheme(nextTheme);
+    setWebSearchSettings({
+      enabled: settings.webSearchEnabled === "true",
+      mode: settings.webSearchMode === "search_api" || settings.webSearchMode === "builtin" ? settings.webSearchMode : "auto",
+      provider: settings.webSearchProvider === "serper" || settings.webSearchProvider === "brave" ? settings.webSearchProvider : "tavily",
+      apiKey: settings.webSearchApiKey ?? "",
+      maxResults: clampInt(settings.webSearchMaxResults, 5, 1, 8),
+    });
   }
 
   async function refreshDataStats() {
@@ -310,6 +379,11 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
     await window.electronAPI.settings.set("theme", value);
   }
 
+  async function saveWebSearchSetting(key: keyof WebSearchSettings, value: string | boolean | number) {
+    setWebSearchSettings((current) => ({ ...current, [key]: value }));
+    await window.electronAPI.settings.set(`webSearch${key.charAt(0).toUpperCase()}${key.slice(1)}`, String(value));
+  }
+
   function update<K extends keyof ProviderInput>(key: K, value: ProviderInput[K]) {
     setForm((current) => ({ ...current, [key]: value }));
   }
@@ -323,6 +397,7 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
       endpointPathMode: baseUrl.endsWith("/v1/chat/completions") ? "exact" : "append_chat_completions",
     });
     setFetchedModels([]);
+    setDetectedModelCapabilities({});
     setManualModel("");
     setModelFilter("");
     setMessage(null);
@@ -332,6 +407,7 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
     setSelectedId(provider.id);
     setForm(toInput(provider));
     setFetchedModels(provider.enabledModels ?? []);
+    setDetectedModelCapabilities({});
     setManualModel("");
     setModelFilter("");
     setMessage(null);
@@ -341,6 +417,7 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
     setSelectedId(null);
     setForm(EMPTY_FORM);
     setFetchedModels([]);
+    setDetectedModelCapabilities({});
     setManualModel("");
     setModelFilter("");
     setMessage(null);
@@ -390,7 +467,12 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
     try {
       const result = await window.electronAPI.providers.listModels(normalizeForm(form));
       setFetchedModels(result.models);
+      setDetectedModelCapabilities(result.modelCapabilities ?? {});
       setModelFilter("");
+      setForm((current) => ({
+        ...current,
+        modelCapabilities: mergeModelCapabilities(current.modelCapabilities, result.models, result.modelCapabilities),
+      }));
       if (result.ok && result.models.length) {
         setMessage({ type: "success", text: s("loadedModels", { count: result.models.length }) });
       } else {
@@ -408,16 +490,16 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
       const nextModels = checked
         ? normalizeModels([...(current.enabledModels ?? []), model])
         : normalizeModels(current.enabledModels ?? []).filter((item) => item !== model);
-      return chooseDefaultModel({ ...current, enabledModels: nextModels, modelCapabilities: syncCapabilities(current.modelCapabilities, nextModels) });
+      return chooseDefaultModel({ ...current, enabledModels: nextModels, modelCapabilities: mergeModelCapabilities(current.modelCapabilities, nextModels) });
     });
   }
 
   function toggleCapability(model: string, capability: ModelCapability, checked: boolean) {
     setForm((current) => {
-      const currentCaps = current.modelCapabilities?.[model] ?? inferModelCapabilities(model);
+      const currentCaps = current.modelCapabilities?.[model] ?? defaultModelCapabilities(model);
       const nextCaps = checked
-        ? normalizeCapabilities([...currentCaps, capability])
-        : normalizeCapabilities(currentCaps.filter((item) => item !== capability));
+        ? normalizeModelCapabilities([...currentCaps, capability])
+        : normalizeModelCapabilities(currentCaps.filter((item) => item !== capability));
       return {
         ...current,
         modelCapabilities: {
@@ -427,19 +509,40 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
       };
     });
   }
+  function reidentifyCapabilities() {
+    setForm((current) => {
+      const models = normalizeModels([...(current.enabledModels ?? []), ...fetchedModels], current.model);
+      return {
+        ...current,
+        modelCapabilities: mergeModelCapabilities({}, models, detectedModelCapabilities),
+      };
+    });
+  }
+  function setCapabilitiesForEnabledModels(capabilities: readonly ModelCapability[]) {
+    setForm((current) => {
+      const models = normalizeModels([...(current.enabledModels ?? []), current.model]);
+      return {
+        ...current,
+        modelCapabilities: {
+          ...(current.modelCapabilities ?? {}),
+          ...Object.fromEntries(models.map((model) => [model, normalizeModelCapabilities(capabilities)])),
+        },
+      };
+    });
+  }
   function addManualModel() {
     const model = manualModel.trim() || form.model.trim();
     if (!model) {
       return;
     }
-    setForm((current) => { const nextModels = normalizeModels([...(current.enabledModels ?? []), model]); return chooseDefaultModel({ ...current, enabledModels: nextModels, modelCapabilities: syncCapabilities(current.modelCapabilities, nextModels) }); });
+    setForm((current) => { const nextModels = normalizeModels([...(current.enabledModels ?? []), model]); return chooseDefaultModel({ ...current, enabledModels: nextModels, modelCapabilities: mergeModelCapabilities(current.modelCapabilities, nextModels) }); });
     setManualModel("");
   }
 
   function removeEnabledModel(model: string) {
     setForm((current) => {
       const nextModels = normalizeModels(current.enabledModels ?? []).filter((item) => item !== model);
-      return chooseDefaultModel({ ...current, enabledModels: nextModels, modelCapabilities: syncCapabilities(current.modelCapabilities, nextModels) });
+      return chooseDefaultModel({ ...current, enabledModels: nextModels, modelCapabilities: mergeModelCapabilities(current.modelCapabilities, nextModels) });
     });
   }
 
@@ -455,7 +558,7 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
       <div className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)]">
         <aside className="border-r border-[#2a2f3a] bg-[#151820] p-3">
           <div className="space-y-1">
-            {(["models", "context", "data", "appearance"] as SettingsTab[]).map((item) => (
+            {(["models", "context", "web", "data", "appearance"] as SettingsTab[]).map((item) => (
               <button
                 key={item}
                 onClick={() => setTab(item)}
@@ -496,6 +599,8 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
               onToggleModel={toggleModel}
               onToggleCapability={toggleCapability}
               onLoadModels={() => void loadModels()}
+              onReidentifyCapabilities={reidentifyCapabilities}
+              onSetCapabilitiesForEnabledModels={setCapabilitiesForEnabledModels}
               onTestConnection={() => void testConnection()}
               onSave={() => void saveProvider()}
               onToggleApiKey={() => setShowApiKey((value) => !value)}
@@ -512,6 +617,8 @@ export default function SettingsPage({ onBack }: SettingsPageProps) {
                 }
               }}
             />
+          ) : tab === "web" ? (
+            <WebSearchTab language={language} settings={webSearchSettings} onChange={saveWebSearchSetting} />
           ) : tab === "context" ? (
             <ContextSettingsTab language={language} settings={contextSettings} onChange={saveContextSetting} />
           ) : tab === "data" ? (
@@ -590,6 +697,8 @@ function ModelConfigTab({
   onToggleModel,
   onToggleCapability,
   onLoadModels,
+  onReidentifyCapabilities,
+  onSetCapabilitiesForEnabledModels,
   onTestConnection,
   onSave,
   onToggleApiKey,
@@ -620,6 +729,8 @@ function ModelConfigTab({
   onToggleModel: (model: string, checked: boolean) => void;
   onToggleCapability: (model: string, capability: ModelCapability, checked: boolean) => void;
   onLoadModels: () => void;
+  onReidentifyCapabilities: () => void;
+  onSetCapabilitiesForEnabledModels: (capabilities: readonly ModelCapability[]) => void;
   onTestConnection: () => void;
   onSave: () => void;
   onToggleApiKey: () => void;
@@ -805,10 +916,22 @@ function ModelConfigTab({
                 <h3 className="text-sm font-semibold">{s("multiModel")}</h3>
                 <p className="mt-1 text-xs text-slate-500">{s("multiModelDesc")}</p>
               </div>
-              <button onClick={onLoadModels} disabled={loadingModels} className="rounded-md border border-[#343b49] px-3 py-2 text-sm text-slate-300 hover:bg-[#242936] disabled:opacity-50">
-                {loadingModels ? s("fetchingModels") : s("fetchModels")}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button onClick={onLoadModels} disabled={loadingModels} className="rounded-md border border-[#343b49] px-3 py-2 text-sm text-slate-300 hover:bg-[#242936] disabled:opacity-50">
+                  {loadingModels ? s("fetchingModels") : s("fetchModels")}
+                </button>
+                <button onClick={onReidentifyCapabilities} className="rounded-md border border-[#343b49] px-3 py-2 text-sm text-slate-300 hover:bg-[#242936]">
+                  {s("reidentifyCapabilities")}
+                </button>
+                <button onClick={() => onSetCapabilitiesForEnabledModels(DEFAULT_MODEL_CAPABILITIES)} className="rounded-md border border-[#343b49] px-3 py-2 text-sm text-slate-300 hover:bg-[#242936]">
+                  {s("enableCommonCapabilities")}
+                </button>
+                <button onClick={() => onSetCapabilitiesForEnabledModels(ALL_MODEL_CAPABILITIES)} className="rounded-md border border-[#343b49] px-3 py-2 text-sm text-slate-300 hover:bg-[#242936]">
+                  {s("enableAllCapabilities")}
+                </button>
+              </div>
             </div>
+            <p className="mt-2 text-xs text-slate-500">{s("capabilityAutoHint")}</p>
 
             <div className="mt-4 flex gap-2">
               <input
@@ -841,6 +964,7 @@ function ModelConfigTab({
                     <label key={model} className="flex items-center gap-2 border-b border-[#202632] px-3 py-2 text-sm last:border-b-0 hover:bg-[#151820]">
                       <input type="checkbox" checked={enabledModels.includes(model)} onChange={(event) => onToggleModel(model, event.target.checked)} />
                       <span className="min-w-0 flex-1 truncate">{model}</span>
+                      <CapabilitySummary capabilities={form.modelCapabilities?.[model] ?? defaultModelCapabilities(model)} />
                     </label>
                   ))}
                   {!visibleFetchedModels.length && <div className="px-3 py-3 text-sm text-slate-500">{s("noModelMatch")}</div>}
@@ -861,7 +985,7 @@ function ModelConfigTab({
                       >
                         {model}
                       </button>
-                      {model === form.model && <span className="text-xs text-emerald-300">{s("default")}</span>}<CapabilityEditor model={model} capabilities={form.modelCapabilities?.[model] ?? inferModelCapabilities(model)} onToggle={onToggleCapability} />
+                      {model === form.model && <span className="text-xs text-emerald-300">{s("default")}</span>}<CapabilityEditor model={model} capabilities={form.modelCapabilities?.[model] ?? defaultModelCapabilities(model)} onToggle={onToggleCapability} />
                       <button onClick={() => onRemoveEnabledModel(model)} className="text-slate-500 hover:text-rose-300" title={s("removeModel")}>
                         x
                       </button>
@@ -909,9 +1033,10 @@ function ContextSettingsTab({
     <section className="max-w-3xl rounded-lg border border-[#2a2f3a] bg-[#151820] p-5">
       <h2 className="font-semibold">{s("contextTitle")}</h2>
       <p className="mt-1 text-sm text-slate-500">{s("autoSave")}</p>
+      <p className="mt-2 text-sm text-slate-400">{language === "zh" ? "未压缩消息会完整发送，不再按条数静默截断，因此长对话可能使用更多 token。压缩时取下面两个保留数量的较大值，并保留完整的最近一轮。" : "Uncompressed messages are sent in full, which may use more tokens. Compression retains the larger of the two counts below and preserves the latest complete turn."}</p>
       <div className="mt-5 grid gap-4">
         <NumberSetting label={s("recentMessages")} value={settings.recentMessages} min={1} max={50} onChange={(value) => onChange("recentMessages", value)} />
-        <NumberSetting label={s("compressKeep")} value={settings.COMPRESS_KEEP} min={1} max={20} onChange={(value) => onChange("COMPRESS_KEEP", value)} />
+        <NumberSetting label={s("compressKeep")} value={settings.COMPRESS_KEEP} min={1} max={50} onChange={(value) => onChange("COMPRESS_KEEP", value)} />
         <NumberSetting label={s("compressThreshold")} value={settings.COMPRESS_THRESHOLD} min={1000} max={100000} onChange={(value) => onChange("COMPRESS_THRESHOLD", value)} />
         <label className="flex items-center justify-between rounded-md border border-[#343b49] bg-[#0f1117] px-3 py-3 text-sm text-slate-300">
           <span>{s("compressionNotice")}</span>
@@ -920,6 +1045,117 @@ function ContextSettingsTab({
       </div>
     </section>
   );
+}
+
+function WebSearchTab({
+  language,
+  settings,
+  onChange,
+}: {
+  language: Language;
+  settings: WebSearchSettings;
+  onChange: (key: keyof WebSearchSettings, value: string | boolean | number) => Promise<void>;
+}) {
+  const s = makeTranslator(language);
+  const [showSearchKey, setShowSearchKey] = useState(false);
+
+  return (
+    <section className="max-w-3xl rounded-lg border border-[#2a2f3a] bg-[#151820] p-5">
+      <h2 className="font-semibold">{s("webTitle")}</h2>
+      <p className="mt-1 text-sm text-slate-500">{s("webDesc")}</p>
+      <div className="mt-5 grid gap-4">
+        <div className="rounded-md border border-[#3b4658] bg-[#101620] px-3 py-2 text-xs leading-5 text-slate-400">
+          {s("webBuiltinTip")}
+        </div>
+
+        <label className="flex items-center justify-between rounded-md border border-[#343b49] bg-[#0f1117] px-3 py-3 text-sm text-slate-300">
+          <span>{s("webEnabled")}</span>
+          <input
+            type="checkbox"
+            checked={settings.enabled}
+            onChange={(event) => void onChange("enabled", event.target.checked)}
+          />
+        </label>
+
+        <label className="grid gap-1 text-sm text-slate-300">
+          <span>{s("webMode")}</span>
+          <select
+            value={settings.mode}
+            onChange={(event) => void onChange("mode", event.target.value as WebSearchMode)}
+            className="rounded-md border border-[#343b49] bg-[#0f1117] px-3 py-2 text-slate-100 outline-none focus:border-[#3b82f6]"
+          >
+            <option value="auto">{s("webModeAuto")}</option>
+            <option value="builtin">{s("webModeBuiltin")}</option>
+            <option value="search_api">{s("webModeSearchApi")}</option>
+          </select>
+          <span className="text-xs text-slate-500">
+            {settings.mode === "builtin" ? s("webModeBuiltinDesc") : settings.mode === "search_api" ? s("webModeSearchApiDesc") : s("webModeAutoDesc")}
+          </span>
+        </label>
+
+        <label className="grid gap-1 text-sm text-slate-300">
+          <span>{s("webProvider")}</span>
+          <select
+            value={settings.provider}
+            onChange={(event) => void onChange("provider", event.target.value as WebSearchProvider)}
+            className="rounded-md border border-[#343b49] bg-[#0f1117] px-3 py-2 text-slate-100 outline-none focus:border-[#3b82f6]"
+          >
+            <option value="tavily">Tavily</option>
+            <option value="serper">Serper</option>
+            <option value="brave">Brave Search</option>
+          </select>
+          <span className="text-xs text-slate-500">{s("webProviderHint")}</span>
+        </label>
+
+        <label className="grid gap-1 text-sm text-slate-300">
+          <span>{s("webApiKey")}</span>
+          <div className="relative">
+            <input
+              type={showSearchKey ? "text" : "password"}
+              value={settings.apiKey}
+              onChange={(event) => void onChange("apiKey", event.target.value)}
+              className="w-full rounded-md border border-[#343b49] bg-[#0f1117] px-3 py-2 pr-11 text-slate-100 outline-none focus:border-[#3b82f6]"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <button
+              type="button"
+              title={showSearchKey ? "隐藏 API Key" : "显示 API Key"}
+              onClick={() => setShowSearchKey((value) => !value)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-1.5 py-1 text-base text-slate-400 hover:bg-[#242936] hover:text-slate-200"
+            >
+              {showSearchKey ? "🙈" : "👁"}
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => window.open(webSearchSignupUrl(settings.provider), "_blank", "noopener,noreferrer")}
+            className="mt-1 w-fit rounded-md border border-[#343b49] px-3 py-1.5 text-xs text-slate-300 hover:bg-[#242936]"
+          >
+            {s("webGetKey")}
+          </button>
+        </label>
+
+        <NumberSetting
+          label={s("webMaxResults")}
+          value={settings.maxResults}
+          min={1}
+          max={8}
+          onChange={(value) => onChange("maxResults", value)}
+        />
+      </div>
+    </section>
+  );
+}
+
+function webSearchSignupUrl(provider: WebSearchProvider) {
+  if (provider === "serper") {
+    return "https://serper.dev";
+  }
+  if (provider === "brave") {
+    return "https://brave.com/search/api/";
+  }
+  return "https://tavily.com";
 }
 
 function DataManagementTab({
@@ -1213,27 +1449,16 @@ function CapabilityEditor({ model, capabilities, onToggle }: { model: string; ca
   );
 }
 
-function syncCapabilities(current: ProviderInput["modelCapabilities"] | undefined, models: string[]) {
-  const out: NonNullable<ProviderInput["modelCapabilities"]> = {};
-  for (const model of models) {
-    out[model] = normalizeCapabilities(current?.[model] ?? inferModelCapabilities(model));
-  }
-  return out;
+function CapabilitySummary({ capabilities }: { capabilities: ModelCapability[] }) {
+  return (
+    <span className="inline-flex items-center gap-1 text-[11px] text-slate-500" aria-label="模型能力">
+      {CAPABILITY_OPTIONS.filter((item) => capabilities.includes(item.value)).map((item) => (
+        <span key={item.value} title={item.title}>{item.label}</span>
+      ))}
+    </span>
+  );
 }
 
-function normalizeCapabilities(values: ModelCapability[]) {
-  return Array.from(new Set<ModelCapability>(["text", ...values]));
-}
-
-function inferModelCapabilities(model: string): ModelCapability[] {
-  const lower = model.toLowerCase();
-  const caps: ModelCapability[] = ["text"];
-  if (/vision|vl|image|visual|gpt-4o|gemini|qwen-vl|qvq|llava|pixtral|claude-3|claude-4|doubao.*vision/.test(lower)) caps.push("vision");
-  if (/tool|function|gpt-4o|gpt-5|claude|gemini|qwen|max|deepseek/.test(lower)) caps.push("tools");
-  if (/web|search|online|sonar|perplexity|联网/.test(lower)) caps.push("web");
-  if (/reason|thinking|r1|o1|o3|o4|qvq|qwq|deepseek-reasoner/.test(lower)) caps.push("reasoning");
-  return Array.from(new Set(caps));
-}
 
 
 
